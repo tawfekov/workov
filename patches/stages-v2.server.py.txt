@@ -1,0 +1,214 @@
+# ---- stages v2 (patches/stages-v2.cjs): Draft - Plan - Design - Todo - Building - Review - Deliver - Done ----
+# The decisions live in ~/.wv-bin/wv-stage.py (zero model tokens, also used by wv-settle / wv-dispatch / wv-adopt). This block only
+# starts the processes a transition needs (designer, reviewer, pull request) and answers the one dashboard action `wv_stage`.
+_WV_STAGE_MOD = [None]
+
+
+def wv_stage_mod():
+    if _WV_STAGE_MOD[0] is None:
+        import importlib.util as _iu
+        base = Path(os.environ.get("WV_BIN_DIR") or (Path.home() / ".wv-bin"))
+        spec = _iu.spec_from_file_location("wv_stage", base / "wv-stage.py")
+        mod = _iu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _WV_STAGE_MOD[0] = mod
+    return _WV_STAGE_MOD[0]
+
+
+def _wv_stage_fake():
+    return os.environ.get("WV_STAGE_FAKE") == "1"  # tests: no process is started; the test reports the outcome itself
+
+
+def _wv_stage_branch(root, tid):
+    try:
+        st = json.loads((Path(root) / "job" / "router-state.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    for v in st.values():
+        if isinstance(v, list):
+            for e in v:
+                if isinstance(e, dict) and str(e.get("ticket", "")).startswith(tid + "-") and e.get("branch"):
+                    b = str(e["branch"])
+                    return b if re.fullmatch(r"[A-Za-z0-9._/-]+", b) else ""
+    return ""
+
+
+def _wv_stage_run(root, cmd, log_name, on_exit):
+    logdir = Path(root) / "job" / "logs"
+    logdir.mkdir(parents=True, exist_ok=True)
+    log = open(logdir / log_name, "ab")
+    try:
+        p = subprocess.Popen(cmd, cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=WV_DETACH if os.name == "nt" else 0)
+    except Exception as e:
+        log.close()
+        on_exit(-1, str(e))
+        return
+
+    def wait():
+        rc = p.wait()
+        log.close()
+        try:
+            tail = (logdir / log_name).read_text(encoding="utf-8", errors="replace")[-6000:]
+        except OSError:
+            tail = ""
+        on_exit(rc, tail)
+    threading.Thread(target=wait, daemon=True).start()
+
+
+class _WvStageHooks:
+    """The processes a transition starts. Each reports back through the engine's events; tick() also derives them from files."""
+
+    def design(self, root, tid):
+        if _wv_stage_fake():
+            return
+        M = wv_stage_mod()
+        d = M.tdir(root, tid)
+
+        def done(rc, out):
+            if rc == 0 and d and (d / "mockup.html").is_file():
+                M.event(root, tid, "design_done")
+            else:
+                M.set_status(root, tid, "designing", stage="design", design={"state": "failed", "at": M.now()})
+        _wv_stage_run(root, ["node", ".claude/scripts/mockup.cjs", d.name], tid + "-designer-run.log", done)
+
+    def review(self, root, tid, by, model):
+        if _wv_stage_fake():
+            return
+        M = wv_stage_mod()
+        sfile = Path(root) / "job" / ("review-" + tid + ".json")
+        sfile.write_text(json.dumps({"ticket": tid, "branch": _wv_stage_branch(root, tid), "commit": "", "by": by, "state": "running", "startedAt": utc_now_iso()}), encoding="utf-8")
+        cmd = ["node", ".claude/scripts/review.cjs", tid, "--by", "claude" if by == "claude" else "fleet"] + (["--fleet-model", model] if by == "model" else [])
+
+        def done(rc, out):
+            rv = M.read_json(sfile)
+            d = M.tdir(root, tid)
+            text = ""
+            try:
+                text = (d / "review.md").read_text(encoding="utf-8") if d else ""
+            except OSError:
+                pass
+            state = rv.get("state") if rv.get("state") in ("clean", "findings") else "failed"
+            M.event(root, tid, "review_result", {"state": state, "findings": rv.get("findings", 0), "text": text or out[-400:]}, WV_STAGE_HOOKS)
+        _wv_stage_run(root, cmd, tid + "-review-run.log", done)
+
+    def deliver(self, root, tid):
+        if _wv_stage_fake():
+            return
+        M = wv_stage_mod()
+        branch = _wv_stage_branch(root, tid)
+        if not branch:
+            M.event(root, tid, "deliver_result", {"ok": False, "error": "No branch is recorded for this ticket in job/router-state.json."}, WV_STAGE_HOOKS)
+            return
+
+        def done(rc, out):
+            m = re.findall(r"MR_URL\s+(https?://\S+)", out)
+            if rc != 0:
+                M.event(root, tid, "deliver_result", {"ok": False, "error": (out.strip().splitlines() or ["land.cjs failed"])[-1][:200]}, WV_STAGE_HOOKS)
+            elif (M.row(root, tid) or {}).get("status") == "done":  # land.cjs already marked it done
+                M.set_status(root, tid, "done", stage="done", prUrl=m[-1] if m else None)
+                if m:
+                    M.set_pr_url(root, tid, m[-1])
+            else:
+                M.event(root, tid, "deliver_result", {"ok": True, "prUrl": m[-1] if m else ""}, WV_STAGE_HOOKS)
+        _wv_stage_run(root, ["node", ".claude/scripts/land.cjs", "deliver", tid, branch], tid + "-deliver-run.log", done)
+
+
+WV_STAGE_HOOKS = _WvStageHooks()
+
+
+def wv_stage_action(tid, req):
+    """The one owner action path of the stage pipeline: every card button and the drawer button POST {action: wv_stage, op, ...}."""
+    try:
+        M = wv_stage_mod()
+    except Exception as e:
+        return 503, {"error": "The stage engine (~/.wv-bin/wv-stage.py) is not installed: " + str(e)[:160]}
+    op = str(req.get("op") or "")
+    root = str(REPO_ROOT)
+    args = {k: req.get(k) for k in ("choice", "note", "by", "model") if req.get(k) is not None}
+    if op in ("review", "review_again"):
+        flag = os.environ.get("WV_STAGE_CLAUDE")
+        args["claudeOk"] = (flag == "1") if flag in ("0", "1") else bool(wv_claude_status().get("loggedIn"))
+    if op == "event" and _wv_stage_fake():
+        return M.event(root, tid, str(req.get("name") or ""), req.get("data") or {}, WV_STAGE_HOOKS)
+    if op == "tick":
+        return 200, {"ok": True, "moved": [list(m) for m in M.tick(root, live=req.get("live"), hooks=WV_STAGE_HOOKS)]}
+    return M.act(root, tid, op, args, WV_STAGE_HOOKS)
+
+
+def wv_stage_retry_other(tid):
+    """Retry of a needs-you ticket that was NOT in Building goes back to the stage it was in, not to the worker queue."""
+    try:
+        M = wv_stage_mod()
+        root = str(REPO_ROOT)
+        r = M.row(root, tid)
+        if r and r["status"] in M.NEED and M.stage_of(r["status"], M.load_sf(root, tid)) != "building":
+            return M.act(root, tid, "retry", {}, WV_STAGE_HOOKS)
+    except Exception:
+        pass
+    return None
+
+
+def wv_stage_annotate(tickets, root=None):
+    """Adds stage, needsYou, ask, waits, prUrl and the card buttons to the tickets of /api/state (root: another project's folder)."""
+    try:
+        M = wv_stage_mod()
+        cfg = wv_fleet_json(root, "specs/workov.config.json") if root else get_config()
+        root = root or str(REPO_ROOT)
+        ctx = {}
+        if any(str(t.get("status")) == "in-review" for t in tickets):
+            claude_ok = bool(wv_claude_status().get("loggedIn")) if os.environ.get("WV_STAGE_CLAUDE") not in ("0", "1") else os.environ.get("WV_STAGE_CLAUDE") == "1"
+            try:
+                connected = wv_connected_ids()
+            except Exception:
+                connected = []
+            ctx["reviewOptions"] = M.review_options(cfg, claude_ok, connected, list(_wv_models_cache[1] or []))
+        M.annotate(root, tickets, ctx)
+    except Exception as e:
+        print(f"[wv] stage annotate failed: {e}", file=sys.stderr)
+
+
+def wv_ensure_loop(work):
+    """The router loop ends by itself when no project has work. A dispatch, a plan or a retry later must bring it back, or the
+    ticket waits for nobody: start it when any project has work and the fleet is not switched off. wv_fleet_start() is not used:
+    it also clears the pause state, which only the owner's Resume does."""
+    if not work or WV_FLEET_OFF.exists() or (REPO_ROOT / "job" / "paused.json").exists():
+        return
+    try:
+        if wv_router_busy():
+            return
+        log = open(REPO_ROOT / "job" / "router-loop.log", "ab")
+        subprocess.Popen([wv_git_bash(), ".claude/scripts/router-loop.sh"], cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, creationflags=WV_DETACH if os.name == "nt" else 0, start_new_session=(os.name != "nt"))
+        print("[wv] router loop started: a project has work", file=sys.stderr)
+    except Exception as e:
+        print(f"[wv] router loop start failed: {e}", file=sys.stderr)
+
+
+def wv_dispatch_run():
+    """Dispatch runs here too, every 30 s, not only between router cycles (a cycle can last minutes: a dead worker would wait for it).
+    wv-dispatch.py is zero-token and takes a machine-wide lock, so this and the router loop never launch the same ticket twice."""
+    if WV_FLEET_OFF.exists() or (REPO_ROOT / "job" / "paused.json").exists():
+        return
+    try:
+        subprocess.run([sys.executable, "-I", str(Path.home() / ".wv-bin" / "wv-dispatch.py")], capture_output=True, timeout=90, creationflags=WV_NOWIN)
+    except Exception as e:
+        print(f"[wv] dispatch run failed: {e}", file=sys.stderr)
+
+
+def wv_stage_tick_all():
+    try:
+        M = wv_stage_mod()
+    except Exception:
+        return
+    work = False
+    for f in wv_fleets():
+        try:
+            M.tick(f["root"], hooks=WV_STAGE_HOOKS)
+            work = work or any(r["status"] in ("specifying", "ready", "in-progress") for r in M.rows(f["root"]))
+        except Exception as e:
+            print(f"[wv] stage tick failed for {f.get('name')}: {e}", file=sys.stderr)
+    wv_ensure_loop(work)
+    if work:
+        wv_dispatch_run()
+
+

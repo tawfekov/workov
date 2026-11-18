@@ -1,0 +1,32 @@
+const STAGES = ['draft', 'plan', 'design', 'todo', 'building', 'review', 'deliver', 'done'];
+      const STAGE_NAME = { draft: 'Draft', plan: 'Plan', design: 'Design', todo: 'Todo', building: 'Building', review: 'Review', deliver: 'Deliver', done: 'Done' };
+      // The column of a status; a card the server annotated (stage) uses its own stage, so a Needs-you flag keeps the card in its column.
+      const STAGE_OF_STATUS = {
+        draft: 'draft',
+        specifying: 'plan',
+        designing: 'design',
+        todo: 'todo',
+        ready: 'todo',
+        'in-progress': 'building',
+        'in-review': 'review',
+        delivering: 'deliver',
+        blocked: 'building',
+        failed: 'building',
+        'budget-exceeded': 'building',
+        done: 'done',
+      };
+      const NEED_STATUS = ['blocked', 'failed', 'budget-exceeded'];
+      // The card's own wording and symbol per status (the lamp comes from STATUS_LAMP).
+      const CARD_STATUS_WORD = {
+        specifying: 'Planning',
+        draft: 'Draft',
+        designing: 'Design',
+        todo: 'Todo',
+        ready: 'Queued',
+        'in-progress': 'Building',
+        'in-review': 'In review',
+        delivering: 'Delivering',
+        blocked: 'Blocked',
+        failed: 'Failed',
+        'budget-exceeded': 'Over budget',
+      };

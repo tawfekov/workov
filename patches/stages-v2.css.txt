@@ -1,0 +1,10 @@
+/* stages v2: eight columns, Needs-you flag, card buttons */
+      .kanban-grid { grid-auto-columns: minmax(228px, 1fr); }
+      .stage-need { margin-left: 6px; }
+      .stage-box { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+      .stage-acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .stage-ask { font-size: var(--fs-label, 12px); color: var(--ink-1, inherit); }
+      .stage-select, .stage-note textarea { max-width: 100%; font: inherit; font-size: 12px; background: var(--surface-2, transparent); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+      .stage-note { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+      .plate.need-chip { font-weight: 700; }
+      .waits-chip { white-space: nowrap; }

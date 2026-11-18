@@ -1,0 +1,102 @@
+// ===== stage actions (stages v2): every card button posts the one action wv_stage =====
+      function stageOfCard(d) {
+        return d.stage && STAGES.indexOf(d.stage) >= 0 ? d.stage : STAGE_OF_STATUS[d.status] || 'draft';
+      }
+      function stagePart2(stage, d) {
+        return d.needsYou ? 0 : 1 + stagePart(stage, d.status);
+      }
+      function stageAskCount() {
+        return ((stateData && stateData.tickets) || []).filter(
+          (t) => t.ask && NEED_STATUS.indexOf(String(t.status || '').toLowerCase()) < 0,
+        ).length;
+      }
+      async function wvStageAct(id, op, extra) {
+        try {
+          const res = await fetch('/api/action', {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify(Object.assign({ action: 'wv_stage', ticket: id, op: op }, extra || {})),
+          });
+          const j = await res.json().catch(() => ({}));
+          if (res.ok) {
+            showToast(j.note || 'Ticket ' + id + ' updated.');
+            await loadAllData();
+          } else if (res.status === 401) {
+            openAuthModal();
+          } else {
+            showToast('Action failed: ' + (j.error || 'HTTP ' + res.status), 'bad');
+          }
+        } catch (e) {
+          showToast('Action request failed: ' + e, 'bad');
+        }
+      }
+      // The Review menu of a card in Review: Claude, any configured model (one is suggested), or skip.
+      function buildReviewMenu(d, a) {
+        const o = a.options || {};
+        const cl = o.claude || {};
+        const sel = h('select', { class: 'stage-select', 'aria-label': 'Review ticket ' + d.id, 'data-fkey': 'review:' + d.id });
+        const add = (parent, value, text, disabled, title) => {
+          const op = h('option', { value: value, text: text, title: title || '' });
+          if (disabled) op.disabled = true;
+          parent.append(op);
+        };
+        add(sel, '', 'Review…');
+        add(sel, 'claude', cl.enabled ? 'Review with Claude' : 'Review with Claude (not available)', !cl.enabled, cl.why || '');
+        const g = h('optgroup', { label: 'Review with any model' });
+        (o.models || []).forEach((m) => add(g, 'model:' + m.id, m.id + (m.suggested ? '  (suggested)' : '')));
+        if (!(o.models || []).length) add(g, '', 'No model is configured', true);
+        sel.append(g);
+        add(sel, 'skip', 'Skip review');
+        sel.addEventListener('click', (e) => e.stopPropagation());
+        sel.addEventListener('change', () => {
+          const v = sel.value;
+          if (!v) return;
+          if (v === 'skip') wvStageAct(d.id, 'skip_review');
+          else if (v === 'claude') wvStageAct(d.id, 'review', { by: 'claude' });
+          else wvStageAct(d.id, 'review', { by: 'model', model: v.slice(6) });
+        });
+        return sel;
+      }
+      function buildStageActions(d) {
+        const acts = Array.isArray(d.actions) ? d.actions : [];
+        const st = d.stageState || {};
+        const info = [];
+        if (st.design === 'running') info.push(h('span', { class: 'note-s', text: 'The designer is working…' }));
+        if (st.design === 'failed') info.push(h('span', { class: 'note-s', text: 'The designer did not finish; try again.' }));
+        if (st.review === 'running') info.push(h('span', { class: 'note-s', text: 'Reviewing…' }));
+        if (st.deliver === 'running') info.push(h('span', { class: 'note-s', text: 'Opening the pull request…' }));
+        if (d.status === 'ready') info.push(h('span', { class: 'note-s', text: 'In the worker queue' }));
+        if (!acts.length && !info.length && !d.ask) return null;
+        const row = h('div', { class: 'stage-acts' });
+        acts.forEach((a) => {
+          if (a.type === 'review-menu') return row.append(buildReviewMenu(d, a));
+          if (a.type === 'note') {
+            const wrap = h('div', { class: 'stage-note' });
+            const ta = h('textarea', { rows: '2', placeholder: 'What is wrong? (re-opens the same ticket)', 'aria-label': 'Note for ticket ' + d.id });
+            const send = h('button', { type: 'button', class: 'btn btn-sm primary', text: 'Re-open', onclick: (ev) => { ev.stopPropagation(); if (ta.value.trim()) wvStageAct(d.id, 'note', { note: ta.value.trim() }); } });
+            wrap.hidden = true;
+            wrap.append(ta, send);
+            wrap.addEventListener('click', (e) => e.stopPropagation());
+            row.append(
+              h('button', { type: 'button', class: 'btn btn-sm', text: a.label, onclick: (ev) => { ev.stopPropagation(); wrap.hidden = !wrap.hidden; if (!wrap.hidden) ta.focus(); } }),
+              wrap,
+            );
+            return;
+          }
+          row.append(
+            h('button', {
+              type: 'button',
+              class: 'btn btn-sm' + (a.primary ? ' primary' : ''),
+              title: a.why || a.hint || '',
+              disabled: !!a.disabled,
+              'data-op': a.op,
+              onclick: (ev) => {
+                ev.stopPropagation();
+                wvStageAct(d.id, a.op, a.choice ? { choice: a.choice } : {});
+              },
+            }, a.label),
+          );
+          if (a.disabled && a.why) row.append(h('span', { class: 'note-s', text: a.why }));
+        });
+        return h('div', { class: 'stage-box' }, d.ask ? h('div', { class: 'stage-ask', text: d.ask.text }) : null, info, row);
+      }
