@@ -1,0 +1,25 @@
+# wv-fleet (Workov base + kit layer; local only, never committed)
+job/
+__pycache__/
+.workov-backup/
+.claude/agents/
+.claude/dashboard/
+.claude/scripts/
+.claude/skills/
+.claude/plan-standard.md
+.claude/settings.json
+.claude/workov.version
+.opencode/agents/checker.md
+.opencode/agents/merger.md
+.opencode/agents/reproducer.md
+.opencode/agents/router.md
+.opencode/agents/teammate.md
+.opencode/agents/tester.md
+.opencode/agents/watchdog.md
+.opencode/agents/worker.md
+.opencode/plugins/
+.agents/skills
+opencode.json
+specs/workov.config.json
+specs/tickets/*/delivery/
+.delivery/

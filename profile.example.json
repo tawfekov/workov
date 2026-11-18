@@ -1,0 +1,11 @@
+{
+  "_comment": "Optional per-person settings for land.cjs (~/.claude/workov-profile.json). Every field may be left out; nothing outside the PR / MR is touched unless trackerHook is set.",
+  "provider": "",
+  "githubLogin": "",
+  "gitlabUserId": 0,
+  "reviewers": [
+    { "name": "reviewer until a date", "githubLogin": "", "gitlabUserId": 0, "until": "2030-12-31" },
+    { "name": "default reviewer", "githubLogin": "", "gitlabUserId": 0, "until": null }
+  ],
+  "trackerHook": ""
+}

@@ -495,3 +495,20 @@ python3 .claude/scripts/selftest.py --filter auth  # a subset
 ```
 
 It builds a throwaway repository, starts the real dashboard server on a spare port against it, and checks the access rules, action validation, board parsing, evidence safety, the audit trail, that `apply-setup.py` changes nothing on a second run, and that no secret sits in a file git would commit.
+
+## The Workov kit
+
+`install.sh` installs the Workov base into a project and layers the kit on top of it: the agents and scripts in `overlay/`
+(landing through a pull request or merge request, a router loop, plan and review helpers) and the `/task` command. Nothing
+it installs is committed to your repository: it is written to `.git/info/exclude`.
+
+```
+bash install.sh <repository>          # clone mode: creates ~/Workov/fleets/<name>
+bash install.sh <repository> --in-place --no-command   # straight into the given repo (for tests)
+bash install.sh --hub                 # the neutral hub only
+bash uninstall.sh <repository>        # remove an in-place install
+```
+
+`install.sh` uses this repository as the base (`--base <path-or-git-url>` to use another checkout). It needs git, bash,
+Node.js and Python 3; the fleet itself needs OpenCode. Optional settings live in `~/.claude/workov-profile.json`
+(see `profile.example.json`).
