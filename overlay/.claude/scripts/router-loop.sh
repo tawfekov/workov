@@ -89,6 +89,81 @@ sync_router() {
   return 0
 }
 oc() { ( cd "$NEUTRAL" && opencode "$@" ); }
+# wv-claude-runtime: the router runs on Claude (your plan) when models.router.runtime is "claude" in the hub config (set on the
+# dashboard, Providers > Agents). It is read every cycle, so a switch applies from the next cycle. router_runtime prints
+# "claude <model>" or "opencode". The OpenCode path below is unchanged.
+router_runtime() {
+  python3 -I - "$HERE/specs/worker-fleet.config.json" <<'PYRT'
+import json, re, sys
+try:
+    r = (json.load(open(sys.argv[1], encoding="utf-8")).get("models") or {}).get("router") or {}
+    m = str((r.get("claude") or {}).get("model") or "sonnet")
+    m = m if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", m) else "sonnet"
+    print("claude " + m if r.get("runtime") == "claude" else "opencode")
+except Exception:
+    print("opencode")
+PYRT
+}
+CSID_FILE="$NEUTRAL/job/router-claude-session"
+CFILTER="$NEUTRAL/job/router-claude-filter.py"
+# turns Claude's stream-json into short log lines, remembers the session id for --resume, exits 1 when the cycle did not finish cleanly
+cat > "$CFILTER" <<'PYFILTER'
+import json, os, sys
+sidfile, ok, seen = sys.argv[1], False, False
+def say(t):
+    print(t[:400].replace("\r", ""), flush=True)
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        e = json.loads(raw)
+    except ValueError:
+        say("router (claude): " + raw)
+        continue
+    if not isinstance(e, dict):
+        continue
+    t = e.get("type")
+    if e.get("session_id") and not seen:
+        seen = True
+        try:
+            open(sidfile, "w", encoding="utf-8").write(str(e["session_id"]))
+        except OSError:
+            pass
+        say("[router-loop] router session: " + str(e["session_id"]) + " (claude)")
+    if t == "assistant":
+        for b in ((e.get("message") or {}).get("content") or []):
+            if b.get("type") == "text" and b.get("text", "").strip():
+                for ln in b["text"].strip().splitlines()[:6]:
+                    if ln.strip():
+                        say("router: " + ln.strip())
+            elif b.get("type") == "tool_use":
+                inp = b.get("input") or {}
+                say("router: > " + str(b.get("name")) + " " + str(inp.get("command") or inp.get("file_path") or inp.get("pattern") or inp.get("description") or "")[:160])
+    elif t == "result":
+        bad = bool(e.get("is_error")) or str(e.get("subtype", "")).startswith("error")
+        ok = not bad
+        say("[router-loop] claude cycle " + ("done" if ok else "FAILED") + ": " + str(e.get("result") or e.get("subtype") or "")[:300] + " (turns " + str(e.get("num_turns", "?")) + ")")
+sys.exit(0 if ok else 1)
+PYFILTER
+# one Claude router cycle: $1 prompt, $2 model, $3 project folder. Returns non-zero when it failed.
+claude_cycle() {
+  local sid rc1 rc2
+  sid=""; [ -f "$CSID_FILE" ] && sid="$(tr -d '\r\n' < "$CSID_FILE")"
+  ( cd "$NEUTRAL" && claude -p --agent router --model "$2" --permission-mode auto --output-format stream-json --verbose ${sid:+--resume "$sid"} --add-dir "$3" "$HERE" --strict-mcp-config "$1" ) 2>&1 | python3 -I "$CFILTER" "$CSID_FILE"
+  local ps=("${PIPESTATUS[@]}"); rc1=${ps[0]:-1}; rc2=${ps[1]:-1}
+  if [ "$rc1" != 0 ] || [ "$rc2" != 0 ]; then
+    [ -n "$sid" ] && rm -f "$CSID_FILE"   # the next cycle starts a fresh session instead of resuming one that may be gone
+    return 1
+  fi
+  return 0
+}
+sync_router_claude() {
+  rm -rf "$NEUTRAL/.claude/agents" && mkdir -p "$NEUTRAL/.claude" && cp -r "$HERE/.claude/agents" "$NEUTRAL/.claude/agents" 2>/dev/null
+  : > "$NEUTRAL/.wv-router"
+  return 0
+}
+CFAILS=0
 SID="${WV_ROUTER_SESSION:-}"
 FIRST="Run the fleet for this project. Reconcile job/router-state.json first: a worker listed there may still be alive inside OpenCode (check its job/status.json heartbeat and its session) before you re-dispatch it. Dispatch every ready ticket, verify finished ones against eval.md, and land them per their Landing mode. Do one full cycle, then end your turn; you will be called again."
 NEXT="Next router cycle for this project: reconcile, read worker heartbeats and results, dispatch ready tickets, verify and land finished ones, answer or record pending decisions. Then end your turn."
@@ -109,15 +184,35 @@ while true; do
   printf '{"name": "%s", "root": "%s", "at": "%s"}\n' "$NAME" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME_DIR/router-project.json"
   CTX="PROJECT $NAME, HOME $ROOT. This cycle is only about this project. Every path in your instructions that starts with job/, specs/, .claude/ or .opencode/ means that path under HOME (use the absolute path), and every git or script command must name the project explicitly: git -C \"$ROOT\" ..., or a script by its absolute path with the project as an argument. Your shell is Windows PowerShell 5.1: NEVER chain commands with && or ||, never use bash-only syntax (export, heredocs, $(...), VAR=x cmd); run one simple command per call. For file work use your Read, Glob, Grep, Write and Edit tools instead of shell commands. Do not touch any other project."
   echo "[router-loop] cycle for $NAME"
-  if [ -z "$SID" ]; then
-    sync_router
-    oc run --auto --agent router "$CTX $FIRST$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)"
-    SID="$(latest_router_session | tr -d '\r')"
-    echo "[router-loop] router session: ${SID:-unknown}"
-  else
-    sync_router
-    oc run --auto --agent router --session "$SID" "$CTX $NEXT$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)"
-  fi
+  RT="$(router_runtime | tr -d '\r')"
+  case "$RT" in
+  claude\ *)
+    CM="${RT#claude }"
+    echo "[router-loop] router on Claude ($CM)"
+    CTXC="${CTX/ Your shell is Windows PowerShell*instead of shell commands./}"
+    sync_router_claude
+    if [ -s "$CSID_FILE" ]; then CMSG="$CTXC $NEXT"; else CMSG="$CTXC $FIRST"; fi
+    if claude_cycle "$CMSG$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)" "$CM" "$ROOT"; then
+      CFAILS=0
+    else
+      CFAILS=$((CFAILS + 1))
+      [ "$CFAILS" -gt 5 ] && CFAILS=5
+      echo "[router-loop] the Claude router cycle failed ($CFAILS in a row); trying again in $((INTERVAL * (CFAILS + 1))) s"
+      sleep $((INTERVAL * CFAILS))
+    fi
+    ;;
+  *)
+    if [ -z "$SID" ]; then
+      sync_router
+      oc run --auto --agent router "$CTX $FIRST$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)"
+      SID="$(latest_router_session | tr -d '\r')"
+      echo "[router-loop] router session: ${SID:-unknown}"
+    else
+      sync_router
+      oc run --auto --agent router --session "$SID" "$CTX $NEXT$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)"
+    fi
+    ;;
+  esac
   sleep "$INTERVAL"
 done
 echo "[router-loop] no project is specifying, ready, in progress or waiting for its answer to be forwarded: stopping"
