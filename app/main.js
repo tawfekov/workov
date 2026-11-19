@@ -1,4 +1,4 @@
-// Workov: Windows launcher (stage 1).
+// Workeve: Windows launcher (stage 1).
 // - starts with Windows (tray), keeps the dashboard + router loop + tunnel running through the fleet's own
 //   start-dashboard.sh (it is idempotent: it reuses a healthy server), restarts them if they die
 // - shows the dashboard in its own window (it is the same page as on the phone, loaded from this computer)
@@ -6,9 +6,9 @@
 // The window loads only 127.0.0.1; the dashboard token is read by this process and never given to the page.
 'use strict';
 const { app, BrowserWindow, Tray, Menu, Notification, shell, nativeImage, dialog, ipcMain, WebContentsView } = require('electron');
-let createEngine = null; try { ({ createEngine } = require('./chat-engine')); } catch { /* the chat window ships separately */ }
+const { createEngine } = require('./chat-engine');
 const setup = require('./setup');
-let createBridge = null; try { ({ createBridge } = require('./chat-bridge')); } catch { /* the chat window ships separately */ }
+const { createBridge } = require('./chat-bridge');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -22,12 +22,15 @@ const SELFTEST = process.argv.includes('--selftest');
 const START_HIDDEN = process.argv.includes('--hidden');
 // WV_TEST_DIR gives tests their own data, config and instance lock, so they never touch an installed copy
 if (process.env.WV_TEST_DIR) app.setPath('userData', path.join(process.env.WV_TEST_DIR, 'userData'));
-// This folder name stays fixed on purpose, so settings and logins survive upgrades.
-const CFG_FILE = path.join(process.env.WV_TEST_DIR || app.getPath('appData'), 'Workov', 'config.json');
+// This folder name stays fixed across rebrands on purpose, so settings and logins are never lost on a rename.
+const CFG_FILE = path.join(process.env.WV_TEST_DIR || app.getPath('appData'), 'Workeve', 'config.json');
 // the neutral hub: dashboard, router loop, shared config and token. It belongs to no project (projects are clones in ~/Workov/fleets).
 const HUB_DIR = path.join(require('os').homedir(), 'Workov', 'hub');
 const DEFAULTS = { fleet: HUB_DIR, autostart: true };
 
+// the app used to be called Workov Fleet: keep its settings
+const OLD_CFG = path.join(path.dirname(path.dirname(CFG_FILE)), 'EjadFleet', 'config.json');
+if (!fs.existsSync(CFG_FILE) && fs.existsSync(OLD_CFG)) { try { fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true }); fs.copyFileSync(OLD_CFG, CFG_FILE); } catch { /* starts fresh */ } }
 let cfg = { ...DEFAULTS };
 try { cfg = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CFG_FILE, 'utf8')) }; } catch { /* first run */ }
 const saveCfg = () => { fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true }); fs.writeFileSync(CFG_FILE, JSON.stringify(cfg, null, 2)); };
@@ -36,7 +39,7 @@ let win = null, tray = null, quitting = false, lastStart = 0, lastNotified = '',
 
 // ---------- the fleet folder ----------
 function fleetJson(rel) { try { return JSON.parse(fs.readFileSync(path.join(cfg.fleet, rel), 'utf8')); } catch { return null; } }
-function port() { const c = fleetJson('specs/workov.config.json'); return (c && c.dashboard && Number(c.dashboard.port)) || 3080; }
+function port() { const c = fleetJson('specs/worker-fleet.config.json'); return (c && c.dashboard && Number(c.dashboard.port)) || 3080; }
 function token() { const a = fleetJson('job/dashboard-auth.json'); return a && a.authToken || ''; }
 // This window is the owner's own: hand it the full-access token through the dashboard's own one-time bootstrap
 // (?token=... -> stored in localStorage, then stripped from the URL by the page itself), so it opens already signed
@@ -47,7 +50,7 @@ function gitBash() { return ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Progr
 function prerequisites() {
   const has = (exe) => spawnSync('where.exe', [exe], { encoding: 'utf8', windowsHide: true }).status === 0;
   return [
-    ['Fleet folder', fs.existsSync(path.join(cfg.fleet, 'specs', 'workov.config.json')), 'Pick the fleet folder (tray menu)'],
+    ['Fleet folder', fs.existsSync(path.join(cfg.fleet, 'specs', 'worker-fleet.config.json')), 'Pick the fleet folder (tray menu)'],
     ['Git Bash', !!gitBash(), 'Install Git for Windows'],
     ['Python', has('python.exe') || has('python3.exe'), 'Install Python 3'],
     ['Node', has('node.exe'), 'Install Node.js'],
@@ -198,14 +201,14 @@ async function addProject(parent) {
 // First run: create the neutral hub and point the app at it. A config that already points at a folder with its own fleet tooling
 // (an older install, where a project was the hub) keeps running as it is; wv-migrate-hub.py moves that to a neutral hub.
 async function ensureHub(bash) {
-  if (fs.existsSync(path.join(cfg.fleet, 'specs', 'workov.config.json'))) return { ok: true, root: cfg.fleet };
+  if (fs.existsSync(path.join(cfg.fleet, 'specs', 'worker-fleet.config.json'))) return { ok: true, root: cfg.fleet };
   const res = await require('./add-project').installHub({ app, bash, dir: HUB_DIR, logFile: path.join(app.getPath('userData'), 'add-project.log') });
   if (res.ok) { cfg.fleet = HUB_DIR; saveCfg(); lastStart = 0; }
   return res;
 }
 
 async function chooseFleet(parent) {
-  const r = await dialog.showOpenDialog(parent || undefined, { title: 'Choose the fleet folder (it contains specs/workov.config.json)', properties: ['openDirectory'], defaultPath: cfg.fleet });
+  const r = await dialog.showOpenDialog(parent || undefined, { title: 'Choose the fleet folder (it contains specs/worker-fleet.config.json)', properties: ['openDirectory'], defaultPath: cfg.fleet });
   if (!r.canceled && r.filePaths[0]) { cfg.fleet = r.filePaths[0]; saveCfg(); lastStart = 0; poll(); }
 }
 function showPrereq() {
@@ -238,7 +241,6 @@ function ensureChatView() {
 function hideChatView() { if (chatView && chatViewShown && win) { try { win.contentView.removeChildView(chatView); } catch { /* already off */ } } chatViewShown = false; }
 function fromDashboard(e) { return !!win && e.sender === win.webContents && e.senderFrame && e.senderFrame.url.startsWith(`http://127.0.0.1:${port()}/`); }
 function openChat() {
-  if (!createEngine) return;
   if (chatWin) { chatWin.show(); chatWin.focus(); return; }
   chatWin = new BrowserWindow({
     width: 1100, height: 820, minWidth: 420, minHeight: 500, backgroundColor: '#0f0e0b', title: APP_NAME + ' Chat', autoHideMenuBar: true,
@@ -252,7 +254,6 @@ function openChat() {
 function bundledClaude() { try { const p = require.resolve('@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe').replace('app.asar', 'app.asar.unpacked'); return fs.existsSync(p) ? p : ''; } catch { return ''; } }
 function rememberFolder(p) { cfg.chatCwd = p; cfg.chatRecent = [p, ...(cfg.chatRecent || []).filter((x) => x !== p)].slice(0, 8); saveCfg(); }
 function setupChat() {
-  if (!createEngine || !createBridge) return; // no chat files installed: the app runs without the chat
   const push = (kind, data) => {
     for (const w of chatContents()) w.send('chat:event', kind, data);
     if (bridge) bridge.publish(kind, data);
@@ -308,7 +309,7 @@ function setupChat() {
     if (!fromDashboard(e) || !s || typeof s !== 'object') return;
     const tokens = {}; // only plain design values are passed on
     for (const [k, v] of Object.entries(s.tokens || {})) if (/^[a-z0-9-]{1,30}$/.test(k) && typeof v === 'string' && v.length < 400 && !/[<>;{}]/.test(v)) tokens[k] = v;
-    lastTheme = { style: ['andon', 'cyberpunk', 'gold'].includes(s.style) ? s.style : 'andon', mode: s.mode === 'light' ? 'light' : 'dark', tokens };
+    lastTheme = { style: ['andon', 'cyberpunk', 'tmzm'].includes(s.style) ? s.style : 'andon', mode: s.mode === 'light' ? 'light' : 'dark', tokens };
     for (const w of chatContents()) w.send('chat:event', 'theme', lastTheme);
     if (chatView && !chatView.webContents.isDestroyed() && /^#[0-9a-f]{3,8}$/i.test(tokens.bg || '')) chatView.setBackgroundColor(tokens.bg);
   });
@@ -452,7 +453,7 @@ app.whenReady().then(async () => {
   const img = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
   tray.on('click', open); tray.on('double-click', open);
-  app.setAppUserModelId('app.workov');
+  app.setAppUserModelId('app.workeve');
   setupChat(); setupIpc(); applyLoginItem(); updateTray(); createWindow();
   if (START_HIDDEN) { const first = setup.checks(cfg); if (!first.ready) toast(APP_NAME + ' needs setup', first.claude.loggedIn ? 'A required tool is missing. Open ' + APP_NAME + ' to finish.' : 'Sign in to Claude to use the chat and planner.', open); }
   if (process.argv.includes('--chat')) openChat();

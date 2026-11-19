@@ -7,7 +7,7 @@ window. It also hosts the chat, first-run setup, notifications, the Background p
 - Develop: `npm install`, then `npm start` (clear `ELECTRON_RUN_AS_NODE` first if you run it from VS Code's terminal: VS Code sets it).
 - Build the installer: `npm run dist` writes `dist-installer/Workov Setup <version>.exe` (NSIS, per user, no admin). It appears in
   Settings > Apps and in Start, and upgrades in place (stable `appId`). Start with Windows is the tray toggle.
-- The installer bundles the fleet kit (`install.sh`, patches, overlay, `wv-bin`, the Workov base files) as
+- The installer bundles the fleet kit (`install.sh`, patches, overlay, `wv-bin`, the vendored worker-fleet) as
   `resources/kit`, which **Add project…** runs. In development the kit is this repository.
 - Test without a window: `Workov.exe --selftest` prints the checks as JSON. `WV_TEST_DIR=<folder>` gives a test run its own
   settings and instance lock; `WV_NO_AUTOSTART=1` skips the Windows startup entry.
@@ -24,8 +24,8 @@ window. It also hosts the chat, first-run setup, notifications, the Background p
   `hubIsProject` (must be false).
 - **Window:** opens maximized the first time, then where and how big you left it (position, size, maximized), also after a
   quit. A saved position on a screen that is gone falls back to a default.
-- Settings: `%APPDATA%\Workov\config.json` (the folder name is kept so settings survive upgrades: `fleet`, `autostart`,
-  `window`, `chatCwd`). Log: `%APPDATA%\Workov\launcher.log`.
+- Settings: `%APPDATA%\Workeve\config.json` (the folder name is kept so settings survive renames: `fleet`, `autostart`,
+  `window`, `chatCwd`). Log: `%APPDATA%\Workeve\launcher.log`.
 - The dashboard is started with the fleet's own `start-dashboard.sh`, so a healthy server is reused, never doubled.
 - The window loads only `127.0.0.1`. The dashboard token is read by the app and never given to the page.
 

@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-// where the kit (install.sh, patches, overlay, the Workov base) lives: inside the installed app, or the repo in development
+// where the kit (install.sh, patches, overlay, vendored worker-fleet) lives: inside the installed app, or the repo in development
 function kitDir(app) { return app.isPackaged ? path.join(process.resourcesPath, 'kit') : path.resolve(__dirname, '..'); }
 
 const slash = (p) => p.replace(/\\/g, '/');
@@ -52,7 +52,7 @@ function installHub({ app, bash, dir, logFile }) {
     child.on('exit', (code) => {
       clearTimeout(timer);
       try { fs.closeSync(out); } catch { /* closed */ }
-      resolve(code === 0 && fs.existsSync(path.join(dir, 'specs', 'workov.config.json')) ? { ok: true, root: dir, log: logFile } : { ok: false, error: 'The hub installer stopped with code ' + code + '.', log: logFile });
+      resolve(code === 0 && fs.existsSync(path.join(dir, 'specs', 'worker-fleet.config.json')) ? { ok: true, root: dir, log: logFile } : { ok: false, error: 'The hub installer stopped with code ' + code + '.', log: logFile });
     });
   });
 }

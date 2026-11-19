@@ -1,4 +1,4 @@
-// First-run checks for the Workov app (main process): what is installed, whether Claude is signed in, and the sign-in itself.
+// First-run checks for the Workeve app (main process): what is installed, whether Claude is signed in, and the sign-in itself.
 'use strict';
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -43,7 +43,7 @@ function hasProject() {
 
 function checks(cfg) {
   const claude = claudeStatus();
-  const fleetOk = fs.existsSync(path.join(cfg.fleet, 'specs', 'workov.config.json'));
+  const fleetOk = fs.existsSync(path.join(cfg.fleet, 'specs', 'worker-fleet.config.json'));
   const list = [
     { id: 'claude', name: 'Claude account', required: true, ok: claude.loggedIn, detail: claude.loggedIn ? `${claude.email}${claude.plan ? ' · ' + claude.plan : ''}${claude.org ? ' · ' + claude.org : ''}` : claude.installed ? 'Not signed in' : 'Claude Code is not installed', hint: claude.installed ? 'Sign in with your Claude account (chat, planner and designer use it)' : 'Install Claude Code, then sign in', action: claude.installed ? 'claude-login' : 'link', link: 'https://claude.com/download' },
     { id: 'git', name: 'Git Bash', required: true, ok: !!gitBash(), detail: gitBash() ? 'found' : 'missing', hint: 'The fleet scripts run in Git Bash', action: 'link', link: 'https://git-scm.com/download/win' },

@@ -1,8 +1,8 @@
 {
-  "name": "workov",
+  "name": "workeve",
   "productName": "Workov",
-  "version": "0.6.0",
-  "description": "Windows launcher for the Workov fleet: starts with Windows, keeps the dashboard, router and tunnel running, shows the dashboard in its own window.",
+  "version": "0.7.0",
+  "description": "Windows launcher for the Workov worker fleet: starts with Windows, keeps the dashboard, router and tunnel running, shows the dashboard in its own window.",
   "main": "main.js",
   "private": true,
   "scripts": {
@@ -21,7 +21,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.325"
   },
   "build": {
-    "appId": "app.workov",
+    "appId": "app.workeve",
     "productName": "Workov",
     "directories": {
       "output": "dist-installer"
@@ -82,15 +82,12 @@
           "uninstall.sh",
           "exclude.txt",
           "profile.example.json",
+          "LICENSE",
           "patches/**/*",
           "overlay/**/*",
           "wv-bin/**/*",
           "commands/**/*",
-          ".claude/**/*",
-          ".opencode/**/*",
-          ".agents/**/*",
-          "opencode.json",
-          "specs/workov.config.json",
+          "vendor/**/*",
           "!**/node_modules/**",
           "!**/job/**",
           "!**/__pycache__/**"
