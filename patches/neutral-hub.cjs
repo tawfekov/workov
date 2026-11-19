@@ -75,6 +75,7 @@ edit('.claude/scripts/dashboard-server.py', (s) => {
 `, 'get_worker_statuses');
   s = rep(s, /            own = wv_norm_root\(sx\["root"\]\) == wv_norm_root\(_WV_BASE_ROOT\)\n/, '            own = False\n', 'sessions own');
   s = rep(s, /        own = wv_norm_root\(root\) == wv_norm_root\(_WV_BASE_ROOT\)\n        _WV_CTX\.root = None if own else root\n/, '        own = False\n        _WV_CTX.root = root\n', 'timeline own');
+  s = rep(s, /other = bool\(base_root\) or wv_norm_root\(str\(BASE\)\) != wv_norm_root\(str\(_WV_BASE_ROOT\)\)/, 'other = True', 'steps other');
   // 5. hub-level files and the router loop come from the hub folder, also inside a project's request context
   s = rep(s, /REPO_ROOT \/ "job" \/ "(router-loop\.log|router-loop\.pid|provider-catalog-v3\.json|provider-logos|chat-bridge\.json|models-backup\.json|notify-secrets\.json|dashboard-url\.txt|failover-cwd)"/g, (m, f) => '_WV_BASE_ROOT / "job" / "' + f + '"', 'hub-level files');
   s = rep(s, /(router-loop\.sh"\], cwd=str\()REPO_ROOT(\))/g, (m, a, b) => a + '_WV_BASE_ROOT' + b, 'router cwd');
@@ -120,7 +121,7 @@ def wv_hub_sync(path):
         rel = Path(path).resolve().relative_to(base).as_posix()
     except ValueError:
         return
-    kind = "cfg" if rel == "specs/workov.config.json" else "oc" if rel == "opencode.json" else "md" if rel.startswith(".opencode/agents/") and rel.endswith(".md") else ""
+    kind = "cfg" if rel == "specs/worker-fleet.config.json" else "oc" if rel == "opencode.json" else "md" if rel.startswith(".opencode/agents/") and rel.endswith(".md") else ""
     if not kind:
         return
     src = base / rel

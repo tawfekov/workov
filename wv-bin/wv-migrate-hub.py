@@ -12,7 +12,7 @@ project and has no tickets; that project becomes a normal one (a clone under ~/W
 Options: --old-hub <dir> (default: root in ~/.workov/hub.json)   --new-hub <dir> (default ~/Workov/hub)
          --project-name <name> (default: its name in fleets.json)   --project-clone <dir> (default ~/Workov/fleets/<name>)
          --origin <url> (default: origin of the old hub)   --branch <name> (default: the branch checked out in the old hub)
-         --app-config <file> (the Workov app's config.json: its "fleet" is pointed at the new hub; default: untouched)
+         --app-config <file> (the Workeve app's config.json: its "fleet" is pointed at the new hub; default: untouched)
          --home <dir> (default: the user home; tests use a scratch one)   --no-fetch   --allow-running
 
 Idempotent: every step checks what is already done, so a second --apply changes nothing. It NEVER stops or kills a process:
@@ -24,7 +24,7 @@ from pathlib import Path
 
 # what makes a folder a hub / a project's fleet tooling (copied, never tickets / history / ledger / worktrees)
 TOOL_DIRS = [".claude/scripts", ".claude/dashboard", ".claude/agents", ".claude/skills", ".opencode", ".agents/skills"]
-TOOL_FILES = [".claude/settings.json", ".claude/workov.version", "opencode.json", "specs/workov.config.json"]
+TOOL_FILES = [".claude/settings.json", ".claude/worker-fleet.version", "opencode.json", "specs/worker-fleet.config.json"]
 # shared hub state the dashboard needs (token stays the same, provider catalog and its logos, failover choice)
 HUB_JOB_FILES = ["dashboard-auth.json", "provider-catalog-v3.json", "provider-catalog.json", "failover-state.json", "models-backup.json",
                  "chat-bridge.json", "notify-secrets.json"]
@@ -34,16 +34,16 @@ PROJ_JOB_FILES = ["router-state.json", "paused.json", "fleet-off", "stages-v2.mi
 PROJ_JOB_DIRS = ["stage", "control", "briefs"]
 PROJ_JOB_GLOBS = ["review-*.json", "status-writer-*.json"]
 SKIP = shutil.ignore_patterns("__pycache__", "node_modules", "*.pyc", "*.db", "*.db-wal", "*.db-shm", "*.lock")
-EXCLUDE = """# wv-fleet (workov + Workov layer; local only, never committed)
+EXCLUDE = """# wv-fleet (worker-fleet + Workov layer; local only, never committed)
 job/
 __pycache__/
-.workov-backup/
+.worker-fleet-backup/
 .claude/agents/
 .claude/dashboard/
 .claude/scripts/
 .claude/skills/
 .claude/settings.json
-.claude/workov.version
+.claude/worker-fleet.version
 .opencode/agents/checker.md
 .opencode/agents/merger.md
 .opencode/agents/reproducer.md
@@ -55,7 +55,7 @@ __pycache__/
 .opencode/plugins/
 .agents/skills
 opencode.json
-specs/workov.config.json
+specs/worker-fleet.config.json
 specs/tickets/*/delivery/
 .delivery/
 """
@@ -282,8 +282,8 @@ def main():
         print("already migrated: hub.json points at the neutral hub %s. Nothing to do (pass --old-hub <folder> to repeat a step)." % slash(hubjson.get("root", "")))
         return 0
     old = Path(slash(a.old_hub or hubjson.get("root", "")))
-    if not str(old) or not (old / "specs" / "workov.config.json").is_file():
-        print("error: the current hub (%s) has no specs/workov.config.json; pass --old-hub" % old, file=sys.stderr)
+    if not str(old) or not (old / "specs" / "worker-fleet.config.json").is_file():
+        print("error: the current hub (%s) has no specs/worker-fleet.config.json; pass --old-hub" % old, file=sys.stderr)
         return 2
     new = Path(slash(a.new_hub or (home / "Workov" / "hub")))
     fleets = jread(wdir / "fleets.json", [])
@@ -291,7 +291,7 @@ def main():
     entry = next((f for f in fleets if isinstance(f, dict) and norm(f.get("root", "")) == norm(old)), None)
     name = a.project_name or (entry or {}).get("name") or old.name
     clone = Path(slash(a.project_clone or (home / "Workov" / "fleets" / re.sub(r"[^A-Za-z0-9._-]+", "-", name))))  # no spaces in the folder name
-    port = int(hubjson.get("port") or ((jread(old / "specs" / "workov.config.json", {}).get("dashboard") or {}).get("port")) or 3080)
+    port = int(hubjson.get("port") or ((jread(old / "specs" / "worker-fleet.config.json", {}).get("dashboard") or {}).get("port")) or 3080)
     if norm(new) == norm(old):
         print("error: the new hub must be a different folder from the old one", file=sys.stderr)
         return 2
@@ -507,14 +507,14 @@ def main():
             app_cfg.write_text(json.dumps(c, indent=2), encoding="utf-8")
         plan.step("app config %s: fleet -> %s" % (app_cfg, slash(new)), write_app, needed=not app_done)
     else:
-        print("  (the Workov app config is not touched; set \"fleet\" to %s by hand or pass --app-config <file>)" % slash(new))
+        print("  (the Workeve app config is not touched; set \"fleet\" to %s by hand or pass --app-config <file>)" % slash(new))
 
     print()
     try:
         plan.show()
     finally:
         pass
-    print("\nnew cfg.fleet value for the Workov app config (%%APPDATA%%\\Workov\\config.json): %s" % slash(new))
+    print("\nnew cfg.fleet value for the Workeve app config (%%APPDATA%%\\Workeve\\config.json): %s" % slash(new))
     print_runbook(old, new, clone, name, port, dpid, rpid, a)
     if not a.apply:
         print("\nnothing was changed. Re-run with --apply to do it.")
@@ -530,7 +530,7 @@ def print_runbook(old, new, clone, name, port, dpid, rpid, a):
     print("       the router loop ends by itself when stopped from the dashboard (Stop fleet), or: taskkill /PID %s /T /F" % (rpid or "<router-loop pid>"))
     print("       any worker already running keeps running in its worktree; wait for it or accept it finishing without the router")
     print("  2. python wv-migrate-hub.py --apply [--app-config <config.json>]")
-    print("  3. quit and restart the Workov app (its cfg.fleet is now %s), or start the hub by hand:" % slash(new))
+    print("  3. quit and restart the Workeve app (its cfg.fleet is now %s), or start the hub by hand:" % slash(new))
     print("       cd \"%s\" && bash .claude/scripts/start-dashboard.sh" % slash(new))
     print("     the router loop starts by itself when a project has work (or press Start fleet in the dashboard)")
     print("  4. check: http://127.0.0.1:%s/ shows %s tickets as <PREFIX>-NNN; /api/wv/projects lists the projects" % (port, name))
