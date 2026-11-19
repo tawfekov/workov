@@ -1,0 +1,131 @@
+# wv-claude-runtime: "claude (your plan)" is a provider for every agent role. A role set to Claude has models.<role>.runtime = "claude"
+# and models.<role>.claude.model = <alias or id>; any other provider sets runtime = "opencode". The runtime is read by the dispatcher
+# (worker), router-loop.sh (router), review.cjs (reviewer), plan.cjs / mockup.cjs (planner, designer); the sub-agents (tester, merger,
+# checker, watchdog, reproducer, teammate) use their .claude/agents/<role>.md `model:` line when their parent runs on Claude.
+WV_CLAUDE_MODELS = ["sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2"]
+WV_CLAUDE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+WV_CLAUDE_AGENT_FILES = {"planner": ["wv-planner"], "designer": ["wv-designer"], "reviewer": ["reviewer", "wv-reviewer"]}
+_wv_claude_hint_cache = [0.0, {}]
+
+
+def wv_role_runtime(cfg, role):
+    """claude or opencode: the runtime a role runs on (planner and designer default to Claude, every other role to OpenCode)."""
+    v = (cfg.get("models") or {}).get(role)
+    r = (v.get("runtime") if isinstance(v, dict) else "") or ("claude" if role in ("planner", "designer") else "opencode")
+    return "claude" if r == "claude" else "opencode"
+
+
+def wv_claude_agent_paths(role):
+    d = REPO_ROOT / ".claude" / "agents"
+    return [d / f"{n}.md" for n in WV_CLAUDE_AGENT_FILES.get(role, [role]) if (d / f"{n}.md").is_file()]
+
+
+def wv_agent_model_line(md):
+    """The value of the model: line in the front matter of an agent file, or None."""
+    try:
+        m = re.match(r"\A---\r?\n(.*?)\r?\n---", md.read_text(encoding="utf-8"), re.S)
+        mm = re.search(r"^model:[ \t]*([^\r\n]*?)[ \t]*$", m.group(1), re.M) if m else None
+        return mm.group(1) if mm else None
+    except OSError:
+        return None
+
+
+def wv_set_agent_model_line(md, model):
+    """Rewrite the model: line of an agent file (front matter only). False when the file has none."""
+    text = md.read_text(encoding="utf-8")
+    m = re.match(r"\A---\r?\n(.*?)\r?\n---", text, re.S)
+    if not m or not re.search(r"^model:", m.group(1), re.M):
+        return False
+    head = re.sub(r"^model:[^\r\n]*", lambda _m: "model: " + model, m.group(1), count=1, flags=re.M)
+    new = text[:m.start(1)] + head + text[m.end(1):]
+    if new != text:
+        wv_atomic_write(md, new)
+    return True
+
+
+def wv_set_claude(role, model):
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", str(role)) or not WV_CLAUDE_ID_RE.fullmatch(str(model)):
+        return 400, {"error": "Give a role and a Claude model such as sonnet, opus, haiku or claude-sonnet-5-5."}
+    path = wv_config_path()
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    entry = (cfg.get("models") or {}).get(role)
+    files = wv_claude_agent_paths(role)
+    if not isinstance(entry, dict):
+        if not files:
+            return 404, {"error": f"No role {role} in the fleet config and no Claude agent file for it."}
+        entry = cfg.setdefault("models", {}).setdefault(role, {})
+    entry["runtime"] = "claude"
+    entry.setdefault("claude", {})["model"] = model
+    wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    changed = ["specs/worker-fleet.config.json"]
+    for md in files:
+        if wv_set_agent_model_line(md, model):
+            changed.append(f".claude/agents/{md.name}")
+    return 200, {"ok": True, "role": role, "model": model, "runtime": "claude", "changed": changed, "note": "Applies from the next agent start."}
+
+
+def wv_claude_fleet(on, model="sonnet"):
+    """Master switch: every role on Claude (a backup of the previous setup is written once) and back."""
+    backup = _WV_BASE_ROOT / "job" / "claude-fleet-backup.json"
+    path = wv_config_path()
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    agents_dir = REPO_ROOT / ".claude" / "agents"
+    mds = sorted(agents_dir.glob("*.md")) if agents_dir.is_dir() else []
+    if on:
+        if not WV_CLAUDE_ID_RE.fullmatch(str(model)):
+            return 400, {"error": "Choose sonnet, opus, haiku or a Claude model id."}
+        if not backup.exists():
+            wv_atomic_write(backup, json.dumps({"at": utc_now_iso(), "models": cfg.get("models") or {}, "hadModels": "models" in cfg,
+                                                "agents": {md.name: wv_agent_model_line(md) for md in mds if wv_agent_model_line(md) is not None}}, indent=2))
+        models = cfg.setdefault("models", {})
+        for role in ("planner", "designer"):
+            models.setdefault(role, {})
+        for v in models.values():
+            if isinstance(v, dict):
+                v["runtime"] = "claude"
+                v.setdefault("claude", {})["model"] = model
+        wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        for md in mds:
+            wv_set_agent_model_line(md, model)
+        return 200, {"ok": True, "on": True, "model": model, "roles": [r for r, v in models.items() if isinstance(v, dict)], "note": "Every agent runs on your Claude plan from its next start."}
+    if not backup.exists():
+        return 409, {"error": "There is no saved OpenCode setup to go back to."}
+    saved = json.loads(backup.read_text(encoding="utf-8"))
+    if saved.get("hadModels", True):
+        cfg["models"] = saved.get("models") or {}
+    else:
+        cfg.pop("models", None)
+    wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    for md in mds:
+        if saved.get("agents", {}).get(md.name) is not None:
+            wv_set_agent_model_line(md, saved["agents"][md.name])
+    backup.unlink(missing_ok=True)
+    return 200, {"ok": True, "on": False, "roles": [r for r, v in (saved.get("models") or {}).items() if isinstance(v, dict)], "note": "The previous providers are back from the next agent start."}
+
+
+def wv_claude_hint():
+    """Signed in or not, and the plan (no email), for the Claude provider row. Cached for a minute; never raises."""
+    if time.time() - _wv_claude_hint_cache[0] < 60 and _wv_claude_hint_cache[1]:
+        return _wv_claude_hint_cache[1]
+    try:
+        a = wv_claude_account()
+        h = {"loggedIn": bool(a.get("loggedIn")), "plan": a.get("plan") or "", "method": a.get("method") or ""}
+    except Exception:
+        h = {"loggedIn": False, "plan": "", "method": ""}
+    _wv_claude_hint_cache[0], _wv_claude_hint_cache[1] = time.time(), h
+    return h
+
+
+def wv_claude_extra(cfg, roles):
+    """Adds the runtime to every role row (in place) and returns the Claude fields of /api/wv/providers."""
+    models = cfg.get("models") or {}
+    for r in roles:
+        r["runtime"] = wv_role_runtime(cfg, r["role"])
+        if r["runtime"] == "claude" and not r.get("claude"):
+            r["claude"] = "sonnet"
+    dicts = [k for k, v in models.items() if isinstance(v, dict)]
+    return {"claudeModels": WV_CLAUDE_MODELS, "claudeInfo": wv_claude_hint(),
+            "claudeAll": bool(dicts) and all(wv_role_runtime(cfg, k) == "claude" for k in dicts),
+            "claudeBackup": (_WV_BASE_ROOT / "job" / "claude-fleet-backup.json").exists()}
+
+

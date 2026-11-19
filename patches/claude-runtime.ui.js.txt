@@ -1,0 +1,63 @@
+          /* wv-claude-runtime: Claude (your plan) as a provider, and the master switch for the whole fleet */
+          (function () {
+            var allOn = !!d.claudeAll;
+            var info = clInfo;
+            var who = !info.loggedIn
+              ? 'Claude is not signed in on this computer: run claude auth login before you pick it.'
+              : 'Claude (your plan): signed in' +
+                (info.plan || info.method ? ' as ' + (info.plan || info.method) : '') +
+                '. No key to connect; agents set to it run on your plan.';
+            if (allOn) {
+              var ban = el(
+                'div',
+                'pvp-claude-all',
+                'The whole fleet runs on Claude. Every agent spends your Claude plan quota (a worker can use a lot); watch the usage on the Claude tab, or switch back below.',
+              );
+              ban.setAttribute('role', 'status');
+              ban.style.cssText =
+                'margin:var(--s3) 0;padding:var(--s2) var(--s3);border-left:4px solid var(--lamp-attn);background:rgba(245,165,36,.12);font-weight:600';
+              body.append(ban);
+            }
+            body.append(el('p', 'pvp-note' + (info.loggedIn ? '' : ' pvp-claude-warn'), who));
+            var sw = el('div', 'pvp-row');
+            sw.style.margin = 'var(--s2) 0';
+            var cm = el('select');
+            cm.setAttribute('aria-label', 'Claude model for the whole fleet');
+            clList.forEach(function (m) {
+              var o = el('option', '', m);
+              o.value = m;
+              cm.append(o);
+            });
+            cm.value = 'sonnet';
+            var on = el('button', 'btn btn-sm btn-primary', 'Run everything on Claude');
+            on.type = 'button';
+            on.id = 'pvp-claude-on';
+            on.onclick = async function () {
+              on.disabled = true;
+              var x = await wvPost({ action: 'wv_claude_fleet', on: true, model: cm.value });
+              on.disabled = false;
+              toast(
+                x.ok
+                  ? 'Every agent now runs on Claude ' + cm.value + ' (next agent start)'
+                  : x.j.error || 'Could not switch',
+                !x.ok,
+              );
+              if (x.ok) load();
+            };
+            var off = el('button', 'btn btn-sm', 'Back to OpenCode providers');
+            off.type = 'button';
+            off.id = 'pvp-claude-off';
+            off.disabled = !d.claudeBackup;
+            off.onclick = async function () {
+              off.disabled = true;
+              var x = await wvPost({ action: 'wv_claude_fleet', on: false });
+              toast(x.ok ? 'The previous providers are back (next agent start)' : x.j.error || 'Could not switch back', !x.ok);
+              if (x.ok) load();
+              else off.disabled = false;
+            };
+            sw.append(cm, on, off);
+            sw.append(
+              el('small', '', 'One model for all agents; the previous setup is saved and restored by the second button.'),
+            );
+            body.append(sw);
+          })();
