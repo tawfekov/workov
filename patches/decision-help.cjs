@@ -1,4 +1,4 @@
-// Workov: make the dashboard's "Answer the worker" box say what is being asked. workov shows only the worker's
+// Workov: make the dashboard's "Answer the worker" box say what is being asked. worker-fleet shows only the worker's
 // last status note there, which is often stale or technical ("plan check fixes applied, draft"). The box now says in
 // plain words what the worker waits for, what to type to accept, and what to do to change something. When the ticket
 // has a mockup it says that the mockup is waiting for approval and where to look at it.

@@ -112,13 +112,13 @@ let p = rd(P);
 if (!p.includes('PLANNER_RUNTIME')) {
   must(p, "const model = opt('--model') || 'sonnet';");
   p = p.replace("const model = opt('--model') || 'sonnet';", () => [
-    "// PLANNER_RUNTIME: --model wins; else the dashboard's choice in specs/workov.config.json (models.planner).",
+    "// PLANNER_RUNTIME: --model wins; else the dashboard's choice in specs/worker-fleet.config.json (models.planner).",
     "const cliModel = opt('--model');",
     "let model = cliModel || 'sonnet';",
     "let runtime = cliModel && cliModel.includes('/') ? 'opencode' : 'claude';",
     "if (!cliModel) {",
     "  try {",
-    "    const pc = (JSON.parse(fs.readFileSync('specs/workov.config.json', 'utf8')).models || {}).planner || {};",
+    "    const pc = (JSON.parse(fs.readFileSync('specs/worker-fleet.config.json', 'utf8')).models || {}).planner || {};",
     "    if (pc.runtime === 'opencode' && pc.opencode && pc.opencode.model) { runtime = 'opencode'; model = pc.opencode.model; }",
     "    else if (pc.claude && pc.claude.model) model = pc.claude.model;",
     "  } catch { /* keep the default */ }",

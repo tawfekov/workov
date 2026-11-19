@@ -1,4 +1,4 @@
-// Workov: show OpenCode agent logs in the dashboard ticket view. workov's /api/logs reads only
+// Workov: show OpenCode agent logs in the dashboard ticket view. worker-fleet's /api/logs reads only
 // job/logs/<ticket>-*.log, which Claude Code workers write. OpenCode workers run as router subagents and keep their
 // conversation in OpenCode's database, so the Logs tab stayed empty. The server now also reads, read-only, every
 // OpenCode session of the ticket (the worker named in job/router-state.json or titled "... ticket NNN ...", plus its

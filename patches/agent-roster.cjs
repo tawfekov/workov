@@ -1,6 +1,6 @@
-// Workov: show every fleet agent with its model and provider in the dashboard. workov's Agents section lists only
+// Workov: show every fleet agent with its model and provider in the dashboard. worker-fleet's Agents section lists only
 // running workers, so nobody could see which model a role uses. The server now answers GET /api/agent-roster from
-// specs/workov.config.json (models) and the agent files' frontmatter (.opencode/agents, .claude/agents), and the
+// specs/worker-fleet.config.json (models) and the agent files' frontmatter (.opencode/agents, .claude/agents), and the
 // page shows it as a table under the Agents heading. Read-only; writes nothing.
 const fs = require('fs');
 const S = '.claude/scripts/dashboard-server.py';

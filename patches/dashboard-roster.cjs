@@ -37,14 +37,14 @@ def wv_agent_roster():`);
         return 404, {"error": f"No role {role} in the fleet config."}
     entry.setdefault("opencode", {})["model"] = model
     wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\\n")
-    changed = ["specs/workov.config.json"]`, String.raw`    has_file = (REPO_ROOT / ".opencode" / "agents" / f"{role}.md").exists()
+    changed = ["specs/worker-fleet.config.json"]`, String.raw`    has_file = (REPO_ROOT / ".opencode" / "agents" / f"{role}.md").exists()
     if not isinstance(entry, dict) and not has_file:
         return 404, {"error": f"No role {role} in the fleet config or the agent files."}
     changed = []
     if isinstance(entry, dict):
         entry.setdefault("opencode", {})["model"] = model
         wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-        changed.append("specs/workov.config.json")`);
+        changed.append("specs/worker-fleet.config.json")`);
   fs.writeFileSync(S, s);
 }
 

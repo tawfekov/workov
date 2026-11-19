@@ -6,7 +6,7 @@
 //     waiting for delivery, done). The "Time per step" panel adds it up per ticket: working vs waiting for you vs queued.
 //  3. Providers panel: switch the model (and so the provider, e.g. opencode-go or the free opencode models) of every
 //     role, and the default implementer CLI the worker hands build steps to (none, copilot, kilo, antigravity, codex).
-//     A model change is written to the three places OpenCode reads (workov.config.json, opencode.json and the
+//     A model change is written to the three places OpenCode reads (worker-fleet.config.json, opencode.json and the
 //     agent file) and applies from the next agent start; the implementer applies from the next worker.
 const fs = require('fs');
 const S = '.claude/scripts/dashboard-server.py';
@@ -45,7 +45,7 @@ def wv_provider_issue():
 
 
 def wv_config_path():
-    return REPO_ROOT / "specs" / "workov.config.json"
+    return REPO_ROOT / "specs" / "worker-fleet.config.json"
 
 
 def wv_model_list():
@@ -82,7 +82,7 @@ def wv_set_model(role, model):
         return 404, {"error": f"No role {role} in the fleet config."}
     entry.setdefault("opencode", {})["model"] = model
     wv_atomic_write(path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-    changed = ["specs/workov.config.json"]
+    changed = ["specs/worker-fleet.config.json"]
     oc = REPO_ROOT / "opencode.json"
     if oc.exists():
         data = json.loads(oc.read_text(encoding="utf-8"))
@@ -240,7 +240,7 @@ for (const f of ['.claude/agents/worker.md', '.opencode/agents/worker.md']) {
   let w = fs.readFileSync(f, 'utf8');
   const old = '(default: you build it yourself)';
   if (w.includes(old)) {
-    w = w.replace(old, () => '(default when rd.md names none: the CLI that `models.worker.delegateCli` in `specs/workov.config.json` names, if it is `copilot`, `kilo` or `antigravity`; otherwise you build it yourself)');
+    w = w.replace(old, () => '(default when rd.md names none: the CLI that `models.worker.delegateCli` in `specs/worker-fleet.config.json` names, if it is `copilot`, `kilo` or `antigravity`; otherwise you build it yourself)');
     fs.writeFileSync(f, w);
     console.log(f + ': default implementer from the config');
   }

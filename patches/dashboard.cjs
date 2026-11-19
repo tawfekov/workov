@@ -1,4 +1,4 @@
-// Patches workov's dashboard (server + page) for Workov: mockup tab and permission requests.
+// Patches worker-fleet's dashboard (server + page) for Workov: mockup tab and permission requests.
 const fs = require('fs');
 const must = (t, a) => { if (!t.includes(a)) throw new Error('anchor missing: ' + a.slice(0, 70)); };
 
