@@ -253,7 +253,7 @@ async function openMr(t, branch, draft) {
   const body = await uploadScreens(gl, t, t.body);
   const reviewer = REVIEWER('gitlab');
   // Some GitLab servers ignore the API's `draft` field: the "Draft: " title prefix is what makes an MR a draft.
-  const title = `${draft ? 'Draft: ' : ''}${t.title.replace(/^(draft:s*)+/i, '')}`;
+  const title = `${draft ? 'Draft: ' : ''}${t.title.replace(/^(draft:\s*)+/i, '')}`;
   const fields = { title, description: body, reviewer_ids: reviewer ? [reviewer] : [], remove_source_branch: false };
   if (ME.gitlab) fields.assignee_ids = [ME.gitlab];
   let mr = await mrFor(gl, branch);

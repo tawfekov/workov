@@ -36,7 +36,12 @@ echo $$ > "$PIDFILE"
 GUARD_PID=$!
 trap 'kill "$GUARD_PID" 2>/dev/null; rm -f "$PIDFILE" "$HOME_DIR/router-project.json"; python3 -I "$HOME/.wv-bin/wv-stop.py" >/dev/null 2>&1' EXIT
 INTERVAL="${WV_ROUTER_INTERVAL:-90}"
-export WV_APPROVALS="${WV_APPROVALS:-auto}"
+# Approvals: the plugin is switched on for every agent this loop starts (1 = on); WHAT it does is the approvals mode, read from
+# WV_APPROVALS (ask | auto-safe) if you set it, else ~/.workov/settings.json, else ask. The loop no longer forces auto.
+export WV_APPROVALS="${WV_APPROVALS:-1}"
+APPROVALS_NOW="$(python3 -I -c "import json,os; p=os.path.join(os.path.expanduser('~'),'.workov','settings.json'); print((json.load(open(p)).get('approvals') or {}).get('mode',''))" 2>/dev/null | tr -d '\r')"
+case "$WV_APPROVALS" in ask|auto-safe|auto) APPROVALS_NOW="$WV_APPROVALS" ;; esac
+echo "approvals mode: ${APPROVALS_NOW:-ask}   (change: bash install.sh --approvals ask|auto-safe, or edit ~/.workov/settings.json)"
 # heavy pnpm/npm commands (test, lint, build, install) wait their turn machine-wide
 export PATH="$HOME/.wv-bin:$PATH"
 # bash agents call the real pnpm/ng directly; this makes them go through the same lock
@@ -93,7 +98,7 @@ oc() { ( cd "$NEUTRAL" && opencode "$@" ); }
 # dashboard, Providers > Agents). It is read every cycle, so a switch applies from the next cycle. router_runtime prints
 # "claude <model>" or "opencode". The OpenCode path below is unchanged.
 router_runtime() {
-  python3 -I - "$HERE/specs/worker-fleet.config.json" <<'PYRT'
+  python3 -I - "$HERE/specs/workov.config.json" <<'PYRT'
 import json, re, sys
 try:
     r = (json.load(open(sys.argv[1], encoding="utf-8")).get("models") or {}).get("router") or {}

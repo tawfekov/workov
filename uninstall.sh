@@ -16,7 +16,7 @@ ARCH="$HOME/Workov/archive/$NAME-$STAMP"
 mkdir -p "$ARCH"
 [ -d "$TARGET/specs/tickets" ] && cp -r "$TARGET/specs/tickets" "$ARCH/tickets" && echo "archived the tickets to $ARCH/tickets"
 [ -d "$TARGET/job/briefs" ] && cp -r "$TARGET/job/briefs" "$ARCH/briefs"
-[ -f "$TARGET/specs/worker-fleet.config.json" ] && cp "$TARGET/specs/worker-fleet.config.json" "$ARCH/"
+[ -f "$TARGET/specs/workov.config.json" ] && cp "$TARGET/specs/workov.config.json" "$ARCH/"
 PATHS=()
 while IFS= read -r line; do
   line="${line%$'\r'}"

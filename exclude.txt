@@ -1,13 +1,14 @@
-# wv-fleet (worker-fleet + Workov layer; local only, never committed)
+# wv-fleet (Workov base + kit layer; local only, never committed)
 job/
 __pycache__/
-.worker-fleet-backup/
+.workov-backup/
 .claude/agents/
 .claude/dashboard/
 .claude/scripts/
 .claude/skills/
+.claude/plan-standard.md
 .claude/settings.json
-.claude/worker-fleet.version
+.claude/workov.version
 .opencode/agents/checker.md
 .opencode/agents/merger.md
 .opencode/agents/reproducer.md
@@ -19,6 +20,6 @@ __pycache__/
 .opencode/plugins/
 .agents/skills
 opencode.json
-specs/worker-fleet.config.json
+specs/workov.config.json
 specs/tickets/*/delivery/
 .delivery/

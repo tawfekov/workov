@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "about": "Rules for wv-policy.cjs. A command is split into segments (; && || | & newline); each segment is matched on its own. deny wins over allow; a segment no rule allows asks. Names are matched in lower case. A '*' at the end of an arg pattern means 'starts with'. Edit here, then run: node tests/test_policy.cjs",
+  "operators": {
+    "about": "Joining operators that are fine because every segment is still checked on its own. Anything not listed asks.",
+    "allow": ["|", "&&", ";", "newline"]
+  },
+  "redirects": {
+    "about": "A redirect to any other target asks (it writes a file). 2>&1 and >/dev/null are fine.",
+    "allowTargets": ["/dev/null", "nul", "$null", "1", "2"]
+  },
+  "network": {
+    "localHosts": ["localhost", "127.0.0.1", "[::1]"]
+  },
+  "wrappers": ["env", "command", "nohup", "time", "exec", "builtin", "timeout"],
+  "deny": [
+    { "id": "git-push", "cmd": "git", "sub": ["push"], "why": "only the merger pushes, through land.cjs" },
+    { "id": "force-flag", "anyArg": ["--force*"], "why": "a force flag overrides a safety check" },
+    { "id": "git-reset-hard-remote", "cmd": "git", "sub": ["reset"], "anyArg": ["--hard"], "targetRegex": "^(origin|main)([/~^@:]|$)", "why": "would throw away local work for a remote state" },
+    { "id": "rm-system-path", "cmd": ["rm", "rmdir", "remove-item"], "recursive": true, "targetRegex": "^(/|~|[.][.]|[A-Za-z]:)", "why": "recursive delete of a root, home, parent or drive path" },
+    { "id": "git-worktree-remove", "cmd": "git", "sub": ["worktree"], "subArg": ["remove", "prune"], "why": "a worktree holds the ticket's uncommitted work: only the reap scripts, which salvage first, may remove one" },
+    { "id": "delete-ticket-worktree", "cmd": ["rm", "rmdir", "remove-item", "del", "ri"], "recursive": true, "targetRegex": "-[0-9]{3}-", "why": "a ticket worktree folder (name contains -NNN-) must not be deleted by hand" },
+    { "id": "network-outside", "cmd": ["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"], "network": "localhost-only", "why": "network access outside localhost" },
+    { "id": "new-dependency", "cmd": ["npm", "pnpm", "yarn"], "sub": ["add", "install", "i"], "needsArg": true, "why": "new dependencies need the owner" }
+  ],
+  "allow": [
+    { "id": "git-readwrite-local", "cmd": "git", "sub": ["status", "diff", "log", "show", "add", "commit", "branch", "switch", "checkout", "rev-parse", "stash", "restore", "merge-base", "ls-files", "blame", "rev-list", "describe", "ls-tree", "cat-file", "show-ref", "for-each-ref", "diff-tree"] },
+    { "id": "git-remote-list", "cmd": "git", "sub": ["remote"], "unlessAnyArg": ["add", "set-url", "remove", "rename", "rm", "set-head", "set-branches", "prune", "update"] },
+    { "id": "git-worktree-list", "cmd": "git", "sub": ["worktree"], "subArg": ["list"] },
+    { "id": "node-project-scripts", "cmd": "node", "firstArgStartsWith": ["node_modules/", ".claude/scripts/", "eslint.", "--check"] },
+    { "id": "package-runners", "cmd": ["npx", "pnpm", "npm"], "sub": ["run", "test", "exec", "ng", "prettier", "eslint", "playwright", "vitest", "tsc"] },
+    { "id": "fleet-scripts", "cmd": ["python", "python3", "bash"], "firstArgStartsWith": [".claude/scripts/"] },
+    { "id": "read-only-tools", "cmd": ["ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "echo", "date", "mkdir", "cp", "mv", "touch", "diff", "sort", "uniq", "which", "test", "cd", "pushd", "popd"] },
+    { "id": "find-without-actions", "cmd": "find", "unlessAnyArg": ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint*"] },
+    { "id": "sed-print-only", "cmd": "sed", "firstArgStartsWith": ["-n"] },
+    { "id": "command-lookup", "cmd": "command", "anyArg": ["-v"] },
+    { "id": "powershell-read-only", "cmd": ["get-command", "test-path", "get-childitem", "get-content", "get-location", "select-string", "where", "type", "get-item", "get-itemproperty", "resolve-path", "split-path", "join-path", "select-object", "where-object", "sort-object", "measure-object", "format-table", "format-list", "out-string", "write-output", "write-host", "set-location", "push-location", "pop-location"] },
+    { "id": "local-curl", "cmd": "curl", "firstArgStartsWith": ["-s"], "localhostOnly": true }
+  ]
+}
