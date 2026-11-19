@@ -111,6 +111,9 @@ def resume_with_answer(root, t, dry):
         return True
     ans = base / "job" / "briefs" / (t["num"] + "-answers.md")
     ans.write_text("The owner's answer to your open questions (from the dashboard):" + chr(10) * 2 + text + chr(10), encoding="utf-8")
+    if not (Path(root) / ".claude" / "scripts" / "plan.cjs").is_file():
+        print(base.name + ": .claude/scripts/plan.cjs is not installed here, so the writer of " + t["slug"] + " cannot be resumed (install the Workov kit overlay)")
+        return False
     out = open(base / "job" / ("plan-" + t["num"] + ".out"), "a", encoding="utf-8")
     flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0
     subprocess.Popen(["node", ".claude/scripts/plan.cjs", t["slug"], "--resume", ids[-1], "--answer", str(ans.relative_to(base)).replace(chr(92), "/")], cwd=root,
