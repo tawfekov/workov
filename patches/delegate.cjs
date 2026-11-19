@@ -1,4 +1,4 @@
-// Adds copilot, kilo and antigravity to workov's delegate-task.sh (command lines from implementers.json).
+// Adds copilot, kilo and antigravity to worker-fleet's delegate-task.sh (command lines from implementers.json).
 const fs = require('fs');
 const f = '.claude/scripts/delegate-task.sh';
 let t = fs.readFileSync(f, 'utf8');

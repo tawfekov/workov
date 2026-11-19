@@ -1,9 +1,9 @@
-// Workov: Auto / Dark / Light for every style, a light Cyberpunk, and expo-out motion for Gold (apply after dashboard-theme.cjs).
+// Workov: Auto / Dark / Light for every style, a light Cyberpunk, and portfolio-style motion for Tmzm (apply after dashboard-theme.cjs).
 //  - Mode (Auto = follow the system, Dark, Light) is now independent of the style. It is stored in mc.mode and applied as
 //    data-mode="dark|light" on <html> before first paint. Andon keeps its own data-theme dark/light as before.
-//  - Cyberpunk gets a light palette (neon accents on a pale lavender ground, all text at 4.5:1 or better); Gold's dark and
+//  - Cyberpunk gets a light palette (neon accents on a pale lavender ground, all text at 4.5:1 or better); Tmzm's dark and
 //    light palettes now follow the Mode (before, light was only the system setting).
-//  - Gold motion, expo-out easing (cubic-bezier(0.16, 1, 0.3, 1)), rises of 700 to 800 ms with a
+//  - Tmzm motion, taken from the portfolio's feel: expo-out easing (cubic-bezier(0.16, 1, 0.3, 1)), rises of 700 to 800 ms with a
 //    60 ms stagger, the gold { } brackets sliding in, the active tab's underline growing from the centre, running lamps
 //    breathing, cards lifting on hover, sections of the long Board page revealing as they scroll in. Entrances play when a tab
 //    is opened (class tm-enter for 2.5 s), never on the 3-second data refresh, and all of it stops under reduced motion.
@@ -19,10 +19,10 @@ if (!h.includes('id="wv-themes2-css"')) {
   const E = 'cubic-bezier(0.16, 1, 0.3, 1)';
   const items = '.station, .kanban-column, .attention-row, .pvp-card, .worker-card, .callout, .readouts';
   let stagger = '';
-  for (let i = 2; i <= 10; i++) stagger += `:root[data-theme="gold"] .tm-enter :is(${items}):nth-child(${i}) { animation-delay: ${(i - 1) * 60}ms; }\n`;
+  for (let i = 2; i <= 10; i++) stagger += `:root[data-theme="tmzm"] .tm-enter :is(${items}):nth-child(${i}) { animation-delay: ${(i - 1) * 60}ms; }\n`;
   const CSS = `<style id="wv-themes2-css">
-/* ---- Gold: both palettes follow the Mode (these beat the older system-setting media query by specificity) ---- */
-:root[data-theme="gold"][data-mode="dark"] {
+/* ---- Tmzm: both palettes follow the Mode (these beat the older system-setting media query by specificity) ---- */
+:root[data-theme="tmzm"][data-mode="dark"] {
   color-scheme: dark;
   --bg: #0f0e0b; --surface-1: #1a1813; --surface-2: #25221b; --surface-3: #2e2a22;
   --line: #3a352b; --line-strong: #6b6456;
@@ -32,7 +32,7 @@ if (!h.includes('id="wv-themes2-css"')) {
   --btn-primary-bg: #c9a14a; --btn-primary-text: #0f0e0b; --focus: #d2ab57; --scrim: rgb(8 7 5 / 0.7); --purple: #c8b6e8;
   --shadow-float: 0 12px 32px -8px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(201 161 74 / 0.18);
 }
-:root[data-theme="gold"][data-mode="light"] {
+:root[data-theme="tmzm"][data-mode="light"] {
   color-scheme: light;
   --bg: #f4f3ef; --surface-1: #fbfaf7; --surface-2: #efece4; --surface-3: #e6e1d4;
   --line: #dcd6c8; --line-strong: #8f8672;
@@ -58,8 +58,8 @@ if (!h.includes('id="wv-themes2-css"')) {
   --cp-marker-glow: 0 0 6px rgb(196 0 159 / 0.45);
   --cp-text-glow: none;
 }
-/* ---- Gold motion ---- */
-:root[data-theme="gold"] { --tm-ease: ${E}; }
+/* ---- Tmzm motion (the portfolio's feel) ---- */
+:root[data-theme="tmzm"] { --tm-ease: ${E}; }
 @keyframes tm-rise { from { opacity: 0; transform: translateY(22px); } }
 @keyframes tm-drop { from { opacity: 0; transform: translateY(-14px); } }
 @keyframes tm-bracket-l { from { opacity: 0; transform: translateX(-16px); } }
@@ -67,21 +67,21 @@ if (!h.includes('id="wv-themes2-css"')) {
 @keyframes tm-grow { from { transform: scaleX(0); } }
 @keyframes tm-breathe { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lamp-run) 50%, transparent); } 55% { box-shadow: 0 0 0 7px transparent; } }
 @media (prefers-reduced-motion: no-preference) {
-  :root[data-theme="gold"] .tm-enter :is(${items}) { animation: tm-rise 800ms var(--tm-ease) backwards; }
-${stagger}  :root[data-theme="gold"] .tm-enter h2.sec { animation: tm-rise 700ms var(--tm-ease) backwards; }
-  :root[data-theme="gold"] .tm-enter h2.sec::before { animation: tm-bracket-l 800ms var(--tm-ease) 140ms backwards; }
-  :root[data-theme="gold"] .tm-enter h2.sec::after { animation: tm-bracket-r 800ms var(--tm-ease) 140ms backwards; }
-  :root[data-theme="gold"].tm-boot .tier1 { animation: tm-drop 800ms var(--tm-ease) backwards; }
-  :root[data-theme="gold"] .tab-btn.active::after { transform-origin: center; animation: tm-grow 600ms var(--tm-ease) backwards; }
-  :root[data-theme="gold"] .lamp.run.lit { animation: tm-breathe 2.8s ease-in-out infinite; }
-  :root[data-theme="gold"] :is(.ticket-card, .pvp-card, .worker-card, .attention-row) { transition: transform 450ms var(--tm-ease), border-color 300ms var(--tm-ease), box-shadow 450ms var(--tm-ease); }
-  :root[data-theme="gold"] :is(.ticket-card, .pvp-card, .worker-card, .attention-row):hover { transform: translateY(-3px); border-color: var(--btn-primary-bg); box-shadow: 0 14px 28px -16px color-mix(in srgb, var(--btn-primary-bg) 55%, transparent); }
-  :root[data-theme="gold"] .btn.primary:hover, :root[data-theme="gold"] .btn-primary:hover { box-shadow: 0 0 0 1px var(--btn-primary-bg), 0 10px 24px -12px var(--btn-primary-bg); }
+  :root[data-theme="tmzm"] .tm-enter :is(${items}) { animation: tm-rise 800ms var(--tm-ease) backwards; }
+${stagger}  :root[data-theme="tmzm"] .tm-enter h2.sec { animation: tm-rise 700ms var(--tm-ease) backwards; }
+  :root[data-theme="tmzm"] .tm-enter h2.sec::before { animation: tm-bracket-l 800ms var(--tm-ease) 140ms backwards; }
+  :root[data-theme="tmzm"] .tm-enter h2.sec::after { animation: tm-bracket-r 800ms var(--tm-ease) 140ms backwards; }
+  :root[data-theme="tmzm"].tm-boot .tier1 { animation: tm-drop 800ms var(--tm-ease) backwards; }
+  :root[data-theme="tmzm"] .tab-btn.active::after { transform-origin: center; animation: tm-grow 600ms var(--tm-ease) backwards; }
+  :root[data-theme="tmzm"] .lamp.run.lit { animation: tm-breathe 2.8s ease-in-out infinite; }
+  :root[data-theme="tmzm"] :is(.ticket-card, .pvp-card, .worker-card, .attention-row) { transition: transform 450ms var(--tm-ease), border-color 300ms var(--tm-ease), box-shadow 450ms var(--tm-ease); }
+  :root[data-theme="tmzm"] :is(.ticket-card, .pvp-card, .worker-card, .attention-row):hover { transform: translateY(-3px); border-color: var(--btn-primary-bg); box-shadow: 0 14px 28px -16px color-mix(in srgb, var(--btn-primary-bg) 55%, transparent); }
+  :root[data-theme="tmzm"] .btn.primary:hover, :root[data-theme="tmzm"] .btn-primary:hover { box-shadow: 0 0 0 1px var(--btn-primary-bg), 0 10px 24px -12px var(--btn-primary-bg); }
 }
 /* sections of the long Board page reveal as they scroll in (scroll-driven, no JS) */
 @media (prefers-reduced-motion: no-preference) {
   @supports (animation-timeline: view()) {
-    :root[data-theme="gold"] #tab-kanban .wv-panel { animation: tm-rise linear both; animation-timeline: view(); animation-range: entry 0% entry 40%; }
+    :root[data-theme="tmzm"] #tab-kanban .wv-panel { animation: tm-rise linear both; animation-timeline: view(); animation-range: entry 0% entry 40%; }
   }
 }
 </style>
@@ -91,10 +91,10 @@ ${stagger}  :root[data-theme="gold"] .tm-enter h2.sec { animation: tm-rise 700ms
 
   const JS = `<script id="wv-themes2-js">
 (function () {
-  var NAMES = { cyberpunk: 'Cyberpunk', gold: 'Gold' };
+  var NAMES = { cyberpunk: 'Cyberpunk', tmzm: 'Tmzm' };
   var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
   function store(k, v) { try { if (v == null) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { /* storage blocked */ } return null; }
-  function styled() { var t = document.documentElement.getAttribute('data-theme'); return t === 'cyberpunk' || t === 'gold'; }
+  function styled() { var t = document.documentElement.getAttribute('data-theme'); return t === 'cyberpunk' || t === 'tmzm'; }
   function mode() { var m = store('mc.mode'); return m === 'dark' || m === 'light' ? m : 'auto'; }
   function effective(m) { return m === 'auto' ? (mq && mq.matches ? 'light' : 'dark') : m; }
   function sync() {

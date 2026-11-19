@@ -5,7 +5,7 @@
 //  - form fields under 16px on phones (iOS zooms the page on focus), small touch targets on coarse pointers
 //  - truncated ticket titles had no way to read the rest; the provider-problem banner was not announced
 //  - numbers jittered as they changed (no tabular figures)
-// Everything uses the theme tokens, so Andon, Cyberpunk and Gold all get it, and reduced motion switches the motion off.
+// Everything uses the theme tokens, so Andon, Cyberpunk and Tmzm all get it, and reduced motion switches the motion off.
 const fs = require('fs');
 const H = '.claude/dashboard/index.html';
 let h = fs.readFileSync(H, 'utf8').replace(/\r\n/g, '\n');

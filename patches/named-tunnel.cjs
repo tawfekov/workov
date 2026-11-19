@@ -1,5 +1,5 @@
 // Workov: let start-dashboard.sh use a Cloudflare NAMED tunnel (a fixed address on the user's own domain) instead of a
-// random quick-tunnel address. workov's config has dashboard.tunnel.namedTunnel but nothing reads it. With
+// random quick-tunnel address. worker-fleet's config has dashboard.tunnel.namedTunnel but nothing reads it. With
 //   "dashboard": { "tunnel": { "provider": "cloudflared", "namedTunnel": "fleet", "hostname": "fleet.example.com" } }
 // the script runs `cloudflared tunnel run --url http://127.0.0.1:<port> fleet` and publishes https://<hostname>/.
 // Without namedTunnel or hostname it behaves exactly as before (quick tunnel). The tunnel and its DNS record are created
@@ -18,8 +18,8 @@ if (!s.includes('WV_NAMED')) {
   const top = 'if [ "$PROVIDER" = "cloudflared" ]; then\n  if command -v cloudflared';
   must(top);
   s = s.replace(top, () => `WV_NAMED=""; WV_HOST=""
-if [ "$PROVIDER" = "cloudflared" ] && [ -f "$JOB_DIR/../specs/workov.config.json" ]; then
-  WV_CFG="$(python3 -I -c 'import json,sys;t=json.load(open(sys.argv[1])).get("dashboard",{}).get("tunnel",{});print(str(t.get("namedTunnel",""))+"|"+str(t.get("hostname","")))' "$JOB_DIR/../specs/workov.config.json" 2>/dev/null | tr -d '\\r')"
+if [ "$PROVIDER" = "cloudflared" ] && [ -f "$JOB_DIR/../specs/worker-fleet.config.json" ]; then
+  WV_CFG="$(python3 -I -c 'import json,sys;t=json.load(open(sys.argv[1])).get("dashboard",{}).get("tunnel",{});print(str(t.get("namedTunnel",""))+"|"+str(t.get("hostname","")))' "$JOB_DIR/../specs/worker-fleet.config.json" 2>/dev/null | tr -d '\\r')"
   WV_NAMED="\${WV_CFG%%|*}"; WV_HOST="\${WV_CFG#*|}"
   [ -n "$WV_HOST" ] || WV_NAMED=""
 fi

@@ -1,4 +1,4 @@
-// Workov: switching from Cyberpunk or Gold back to Andon did nothing. The themes2 wrapper around applyTheme treats any
+// Workov: switching from Cyberpunk or Tmzm back to Andon did nothing. The themes2 wrapper around applyTheme treats any
 // Auto/Dark/Light call made while a styled theme is active as a MODE change (so the mode buttons keep the style). But
 // chooseThemeStyle('andon') leaves the styled theme by calling applyTheme('auto'|'dark'|'light', true), which the wrapper
 // swallowed as a mode change: the style never changed. The style switch now passes persist = 'style' and the wrapper only

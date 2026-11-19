@@ -1,5 +1,5 @@
 // Workov: the worker edits only inside its own worktree (apply after worker.cjs).
-// Found in a live run: the worker's shell and editor tools started in the MAIN checkout, so its edits went there by
+// Found on ticket 009: the worker's shell and editor tools started in the MAIN checkout, so its edits went there by
 // absolute path while its worktree and branch stayed untouched, and its own `pnpm format` (`prettier --write .`) rewrote
 // every file of the main checkout, including the dashboard page and BOARD.md that the fleet reads.
 const fs = require('fs');
