@@ -48,13 +48,13 @@ for sub in (".claude/scripts", ".claude/dashboard", ".claude/agents", ".opencode
 for d in ("specs/tickets", "job"):
     (fx / d).mkdir(parents=True, exist_ok=True)
 port = free_port()
-cfg = {"version": "0.1", "harness": "both", "preset": "hybrid-bridge",
+cfg = {"version": "2.0.0", "harness": "both", "preset": "hybrid-bridge",
        "concurrency": {"maxParallelWorkers": 2, "mainPort": free_port(), "reproducerPort": free_port(), "workerBasePort": 3961, "dashboardPort": port},
        "watchdog": {"intervalMinutes": 10, "stallThresholdMinutes": 15, "autoCompactWindow": 150000}, "regression": {"everyNMerges": 1},
        "models": {"worker": {"opencode": {"model": "opencode-go/kimi-k2.7-code"}}, "reviewer": {"opencode": {"model": "opencode-go/deepseek-v4-pro"}},
                   "tester": {"opencode": {"model": "opencode-go/glm-5.3-flash"}}},
        "dashboard": {"enabled": True, "autoStartWithRouter": False, "port": port, "allowRemoteActions": True, "tunnel": {"provider": "cloudflared", "namedTunnel": ""}}}
-(fx / "specs" / "workov.config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+(fx / "specs" / "worker-fleet.config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 (fx / "job" / "fleet-off").write_text("test\n", encoding="utf-8")  # the server never starts a router or a worker here
 env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), WV_BIN_DIR=str(home / ".wv-bin"), WV_STAGE_FAKE="1", WV_STAGE_CLAUDE="1", PYTHONIOENCODING="utf-8")
 r = subprocess.run(["node", str(KIT / "patches" / "stages-v2.cjs")], cwd=str(fx), capture_output=True, text=True)
@@ -66,7 +66,7 @@ r2 = subprocess.run(["node", str(KIT / "patches" / "stages-v2.cjs")], cwd=str(fx
 check("patch is idempotent", r2.stdout.strip() == "" and r2.returncode == 0, r2.stdout)
 r = subprocess.run([sys.executable, "-m", "py_compile", str(fx / ".claude/scripts/dashboard-server.py")], capture_output=True, text=True)
 check("py_compile server", r.returncode == 0, r.stderr)
-subprocess.run([sys.executable, str(fx / ".claude/scripts/apply-setup.py"), "--config", str(fx / "specs/workov.config.json")], cwd=str(fx), capture_output=True, text=True, env=env, timeout=90)
+subprocess.run([sys.executable, str(fx / ".claude/scripts/apply-setup.py"), "--config", str(fx / "specs/worker-fleet.config.json")], cwd=str(fx), capture_output=True, text=True, env=env, timeout=90)
 try:
     token = json.loads((fx / "job" / "dashboard-auth.json").read_text(encoding="utf-8"))["authToken"]
 except Exception:

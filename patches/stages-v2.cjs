@@ -26,7 +26,7 @@ function edit(file, label, fn) {
 function swap(s, old, neu) {
   if (s === null) return null;
   let i = s.indexOf(old), len = old.length;
-  if (i < 0) { // an older dashboard layout is indented by 4 and column padded: match with any run of whitespace
+  if (i < 0) { // the older vendored dashboard is indented by 4 and column padded: match with any run of whitespace
     const m = new RegExp(old.trim().replace(/\((\w+)\) =>/g, '$1 =>').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')).exec(s);
     if (m) { i = m.index; len = m[0].length; neu = neu.replace(/^\s+/, ''); }
   }
@@ -62,7 +62,7 @@ edit('.claude/dashboard/index.html', 'stages-v2 ui', (s) => {
   let o = s;
   // vocabulary
   o = o === null ? null : o.replace(/const STATUS_ORDER = \[[\s\S]*?\];/, "const STATUS_ORDER = [\n        'draft',\n        'specifying',\n        'designing',\n        'todo',\n        'ready',\n        'in-progress',\n        'in-review',\n        'delivering',\n        'blocked',\n        'failed',\n        'budget-exceeded',\n        'done',\n      ];");
-  if (o !== null && !o.includes("draft: { lamp: 'off', lit: false, label: 'DRAFT', name: 'Draft' },")) { // an older layout: quoted, column padded keys
+  if (o !== null && !o.includes("draft: { lamp: 'off', lit: false, label: 'DRAFT', name: 'Draft' },")) { // the older vendored layout: quoted, column padded keys
     const m = /^( *)'draft':\s*\{ lamp: 'off',[^\n]*\n/m.exec(o);
     const add = (k, v) => m[1] + "'" + k + "': " + v + ',\n';
     o = m ? o.slice(0, m.index + m[0].length) + add('designing', "{ lamp: 'info', lit: true, label: 'DESIGN', name: 'Design' }") + add('todo', "{ lamp: 'ready', lit: false, label: 'TODO', name: 'Todo' }") + add('delivering', "{ lamp: 'info', lit: true, label: 'DELIVERING', name: 'Deliver' }") + o.slice(m.index + m[0].length) : null;
@@ -163,7 +163,7 @@ edit('.claude/scripts/review.cjs', 'stages-v2 review.cjs', (s) => {
   const b = s.indexOf(endMark);
   if (a < 0 || b < a) return null;
   let o = s.slice(0, a) + "  /* wv-stages-v2 */ if (state === 'findings') line(`${count} finding(s): the owner chooses Fix or Skip on the dashboard`);\n" + s.slice(b + endMark.length);
-  const fm = "try { fm = JSON.parse(fs.readFileSync('specs/workov.config.json', 'utf8')).models.reviewer.opencode.model || fm; } catch {}";
+  const fm = "try { fm = JSON.parse(fs.readFileSync('specs/worker-fleet.config.json', 'utf8')).models.reviewer.opencode.model || fm; } catch {}";
   if (o.includes(fm)) o = o.replace(fm, () => fm + "\n    { const i = process.argv.indexOf('--fleet-model'); if (i > 0 && /^[\\w.-]+\\/[\\w.:/-]+$/.test(process.argv[i + 1] || '')) fm = process.argv[i + 1]; }");
   return o;
 });

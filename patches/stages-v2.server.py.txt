@@ -152,7 +152,7 @@ def wv_stage_annotate(tickets, root=None):
     """Adds stage, needsYou, ask, waits, prUrl and the card buttons to the tickets of /api/state (root: another project's folder)."""
     try:
         M = wv_stage_mod()
-        cfg = wv_fleet_json(root, "specs/workov.config.json") if root else get_config()
+        cfg = wv_fleet_json(root, "specs/worker-fleet.config.json") if root else get_config()
         root = root or str(REPO_ROOT)
         ctx = {}
         if any(str(t.get("status")) == "in-review" for t in tickets):
