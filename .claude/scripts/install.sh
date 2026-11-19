@@ -303,6 +303,12 @@ install_file_from() { # $1 = absolute source file, $2 = relative path
   if [[ -f "$d" && ! -L "$d" ]] && cmp -s "$s" "$d"; then
     return 0
   fi
+  # The target's own Claude Code settings are never replaced or backed up:
+  # apply-setup.py merges the fleet's keys into the existing file.
+  if [[ "$2" == ".claude/settings.json" && -f "$d" && ! -L "$d" ]]; then
+    [[ $PLAN -eq 1 ]] || echo "  keep:   .claude/settings.json (existing; apply-setup.py merges into it)"
+    return 0
+  fi
   clear_blocking_ancestors "$2"
   if path_exists "$d"; then backup_collision "$2"; fi
   [[ $PLAN -eq 0 ]] || return 0
@@ -343,6 +349,7 @@ install_dir_from() { # $1 = absolute source dir, $2 = relative path
     base="$(basename "$child")"
     case "$base" in
       __pycache__ | .* | *.swp | *~ | *.pyc) continue ;;
+      test_*.py) [[ "$2" == ".claude/hooks" ]] && continue ;;
     esac
     rel="$2/$(basename "$child")"
     if [[ -L "$child" ]]; then
@@ -363,6 +370,7 @@ install_dir_tracked() {
   while IFS= read -r -d '' p; do
     case "$p" in
       */__pycache__/* | *.pyc) continue ;;
+      .claude/hooks/test_*.py) continue ;; # the hook's own tests stay in the source
     esac
     src="$SRC/$p"
     rel="$tgtrel/${p#"$srcrel"/}"
@@ -420,6 +428,7 @@ MANIFEST=(
   .claude/skills
   .claude/scripts
   .claude/dashboard
+  .claude/hooks
   .claude/settings.json
   .opencode/agents
   .agents/skills
@@ -550,7 +559,7 @@ if ! path_exists "$TGT/specs/tickets/BOARD.md"; then
   cat > "$TGT/specs/tickets/BOARD.md" <<'BOARDEOF'
 # Ticket Board
 
-Status: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `done` | `failed` | `budget-exceeded` | `in-review`.
+Status: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `awaiting-merge` | `done` | `failed` | `budget-exceeded` | `in-review`.
 Mode: `solo` (one worker subagent) | `team` (agent team, for foundational or multi-surface tickets).
 Runs: `alongside` (no dependencies, safe to run with other tickets) | `waits for NNN: reason`.
 

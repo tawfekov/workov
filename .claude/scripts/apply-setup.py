@@ -319,6 +319,7 @@ def default_config() -> dict:
         "telemetry": {"rates": copy.deepcopy(DEFAULT_TELEMETRY_RATES)},
         "budget": {"defaults": {"usd": 10.0, "turns": 300}},
         "landing": "direct",
+        "runtime": "terminal",
     }
 
 
@@ -382,6 +383,7 @@ NOTIFY_EVENTS = (
     "regression_confirmed",
     "needs_human",
     "watchdog_stall",
+    "awaiting_merge",
 )
 
 
@@ -814,6 +816,102 @@ def update_port_registry(repo_root: Path, config: dict) -> None:
     print(f"Port registry: {reg} lists {len(kept)} project(s); {overlapping} other project(s) overlap this one's ports.")
 
 
+# --- Claude Code settings (.claude/settings.json) ---------------------------------
+SETTINGS_REL = Path(".claude") / "settings.json"
+SETTINGS_ENV_DEFAULTS = {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3",
+}
+FLEET_HOOK_MARKER = "fleet-hook.py"
+# `|| true`: a missing script makes python3 exit 2, which Claude Code treats as a blocking error.
+FLEET_HOOK_COMMAND = 'python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py" || true'
+FLEET_HOOK_REL = Path(".claude") / "hooks" / "fleet-hook.py"
+FLEET_HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
+
+
+def _is_fleet_handler(handler) -> bool:
+    return isinstance(handler, dict) and FLEET_HOOK_MARKER in str(handler.get("command", ""))
+
+
+def merge_claude_settings(existing: dict, runtime: str) -> dict:
+    """Return `existing` with the fleet's settings merged in (pure: the input is not changed).
+
+    Both env keys are set only where absent. runtime "app" ensures one fleet hook
+    group per event in FLEET_HOOK_EVENTS (an event already counts when any handler
+    command in any of its groups contains fleet-hook.py, and its command is set to
+    FLEET_HOOK_COMMAND when it differs); runtime "terminal" removes
+    every fleet handler and prunes the groups, events and `hooks` key left empty.
+    Everything else is returned untouched. A shape that cannot be merged raises ValueError.
+    """
+    merged = copy.deepcopy(existing)
+    env = merged.setdefault("env", {})
+    if not isinstance(env, dict):
+        raise ValueError("env must be an object")
+    for key, value in SETTINGS_ENV_DEFAULTS.items():
+        env.setdefault(key, value)
+
+    hooks = merged.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        raise ValueError("hooks must be an object")
+    for event, groups in (hooks or {}).items():
+        if not isinstance(groups, list):
+            raise ValueError("hooks.%s must be a list" % event)
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks", []), list):
+                raise ValueError("hooks.%s has a malformed matcher group" % event)
+
+    if runtime == "app":
+        if hooks is None:
+            hooks = merged["hooks"] = {}
+        for event in FLEET_HOOK_EVENTS:
+            groups = hooks.setdefault(event, [])
+            found = [h for g in groups for h in g.get("hooks", []) if _is_fleet_handler(h)]
+            for handler in found:
+                handler["command"] = FLEET_HOOK_COMMAND  # an old-form entry is upgraded in place
+            if not found:
+                groups.append({"hooks": [{"type": "command", "command": FLEET_HOOK_COMMAND}]})
+    elif hooks is not None:
+        for event in list(hooks):
+            kept = []
+            for group in hooks[event]:
+                handlers = group.get("hooks")
+                if handlers is None:
+                    kept.append(group)
+                    continue
+                remaining = [h for h in handlers if not _is_fleet_handler(h)]
+                if len(remaining) == len(handlers):
+                    kept.append(group)
+                elif remaining:
+                    kept.append(dict(group, hooks=remaining))
+            if kept:
+                hooks[event] = kept
+            else:
+                del hooks[event]
+        if not hooks:
+            del merged["hooks"]
+    return merged
+
+
+def write_json_atomic(path: Path, doc: dict) -> None:
+    """Write `doc` as 2-space JSON with a trailing newline (temp file in the same dir, then os.replace)."""
+    tmp = path.parent / (".%s.%d.tmp" % (path.name, os.getpid()))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if path.is_file():
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))  # keep the old file's permission bits
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description="Apply workov configuration")
     parser.add_argument("--config", help="Path to specs/workov.config.json", default=None)
@@ -861,8 +959,13 @@ def main():
     )
     parser.add_argument(
         "--landing",
-        choices=["direct", "pr"],
-        help="Ticket landing mode: direct merge to main (default) or push the branch and open a GitHub PR",
+        choices=["direct", "pr", "approve"],
+        help="Ticket landing mode: direct merge to main (default), push the branch and open a GitHub PR, or approve (wait for an approve_merge in the dashboard)",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["app", "terminal"],
+        help="Where the fleet runs: terminal (default) or app (registers the fleet hook in .claude/settings.json and, when switching from terminal, sets landing to approve unless it is already pr or approve)",
     )
     # Ticket 017: script-mode watchdog configuration.
     parser.add_argument(
@@ -1104,10 +1207,60 @@ def main():
     # default) or "pr" (push the branch and open a GitHub PR). Same pattern
     # as the regression cadence — an explicit flag overrides, a missing key
     # is normalized to the default of "direct".
+    runtime_before = config.get("runtime")
+    if args.runtime:
+        config["runtime"] = args.runtime
+    else:
+        config.setdefault("runtime", "terminal")
     if args.landing:
         config["landing"] = args.landing
+    elif args.runtime == "app" and runtime_before != "app":
+        # Switching to app: the merge gate is the default, but an explicit pr stays.
+        if config.get("landing") in (None, "direct"):
+            config["landing"] = "approve"
+        elif config.get("landing") == "pr":
+            print('Landing stays "pr". To approve merges in the dashboard instead, re-run with --landing approve.')
     else:
         config.setdefault("landing", "direct")
+
+    # Claude Code settings: read and merge now so an unusable file stops the run
+    # before anything is written; the merged result is written after the config.
+    settings_path = repo_root / SETTINGS_REL
+    settings_text = None
+    settings_new = None
+    try:
+        if settings_path.is_file():
+            settings_text = settings_path.read_text(encoding="utf-8")
+            try:
+                settings_doc = json.loads(settings_text)
+            except ValueError as exc:
+                raise ValueError("not valid JSON (%s)" % exc)
+            if not isinstance(settings_doc, dict):
+                raise ValueError("top level must be a JSON object")
+        else:
+            settings_doc = {}
+        settings_new = merge_claude_settings(settings_doc, config["runtime"])
+    except (ValueError, OSError) as exc:
+        print(f"ERROR: {settings_path}: {exc}; fix or move it, then re-run; nothing was changed", file=sys.stderr)
+        sys.exit(1)
+    settings_changed = settings_text is None or settings_new != settings_doc
+
+    if config["runtime"] == "app":
+        hook_file = repo_root / FLEET_HOOK_REL
+        untracked = False
+        if hook_file.is_file():
+            try:
+                git_dir = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=str(repo_root),
+                                         capture_output=True, text=True, check=False)
+                if git_dir.returncode == 0:
+                    untracked = subprocess.run(
+                        ["git", "ls-files", "--error-unmatch", FLEET_HOOK_REL.as_posix()], cwd=str(repo_root),
+                        capture_output=True, text=True, check=False).returncode != 0
+            except OSError:
+                pass
+        if not hook_file.is_file() or untracked:
+            print("WARNING: .claude/hooks/fleet-hook.py is missing or not tracked by git; commit it with "
+                  ".claude/settings.json or worker sessions will have no hook data.")
 
     # PR landing preflight (non-fatal warning): PR mode needs the gh CLI on
     # PATH and an origin remote to push to. A missing piece only warns —
@@ -1227,6 +1380,13 @@ def main():
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     print(f"✔ Configuration saved to {config_path}")
+    if settings_changed:
+        try:
+            write_json_atomic(settings_path, settings_new)
+        except OSError as exc:
+            print(f"ERROR: cannot write {settings_path}: {exc.strerror}", file=sys.stderr)
+            sys.exit(1)
+        print(f"✔ Claude Code settings updated: {settings_path} (runtime: {config['runtime']})")
 
     # Ticket 048: warnings never stop the run and never print a value.
     if notify_secrets_path.exists():
@@ -1399,10 +1559,11 @@ def main():
         "                       ~ est. only (never an invoice); USD per 1M tokens in/out, "
         "from telemetry.rates in specs/workov.config.json"
     )
+    print(f" • Runtime:            {config.get('runtime', 'terminal')}")
     landing_mode = config.get("landing", "direct")
     print(
         f" • Landing Mode:       {landing_mode} "
-        f"({'merge verified tickets straight to main' if landing_mode == 'direct' else 'push branches and open GitHub PRs (tickets wait in in-review)'})"
+        f"({'merge verified tickets straight to main' if landing_mode == 'direct' else 'verified tickets wait in awaiting-merge until you approve them in the dashboard' if landing_mode == 'approve' else 'push branches and open GitHub PRs (tickets wait in in-review)'})"
     )
     wd_summary = config.get("watchdog", {})
     print(

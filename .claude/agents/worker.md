@@ -17,6 +17,16 @@ You build one `solo` ticket end-to-end inside your isolated git worktree.
 - **Attempt number**: `Attempt: N of M+1` and `maxRetries: M` when the router re-dispatches you after a failed attempt. Echo it into your heartbeat as `"attempt": N` (`"attempt": 1` on a first dispatch).
 - **Previous attempt findings**: if your prompt contains a `## Previous attempt findings` block, read it FIRST and consume it — it is the failure context handed over from the attempt before you (the previous status note, last tester FAIL lines, last reviewer `CHANGES_REQUIRED` items, capped at 3). Fix the root causes it names; do not repeat what already failed.
 
+# Ticket Status Is Read From the Main Board
+The board in the main checkout is the source of truth for a ticket's status. The owner's approval is written there without a commit, so the `**Status:**` line in your own copy of `rd.md` may still say `draft`. A worker dispatched by the router treats the ticket as approved and never refuses or pauses because of that line.
+
+# First Step: Fleet Marker (`job/ticket.json`)
+If the router's brief gave you marker values (ticket number, slug, kind and main checkout path), do this before anything else, including before you read the ticket. Write `job/ticket.json` at the root of your working folder (the folder you start in, not a subdirectory; create `job/` if needed) with exactly:
+```json
+{"ticket": "NNN", "slug": "<slug>", "kind": "session|subagent", "main": "<absolute path of the main checkout>"}
+```
+and add `job/` to `.git/info/exclude`. The fleet hooks use this file to recognise a fleet worker and to report its activity to the dashboard. If the brief gave no marker values (the terminal-mode router passes none), skip this step.
+
 # Status Heartbeat (`job/status.json`)
 Maintain a status file at `job/status.json` inside your worktree (create the `job/` directory if needed, and add `job/` to `.git/info/exclude` so it doesn't pollute commits). Update `job/status.json` whenever your phase changes so the `watchdog`, `router`, and Fleet Control Dashboard know you are alive:
 ```json

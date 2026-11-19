@@ -18,6 +18,7 @@ This is version 0.1, the first release.
 - [Quick start: your first merged ticket](#quick-start-your-first-merged-ticket)
 - [How a ticket flows](#how-a-ticket-flows)
 - [Agents and skills](#agents-and-skills)
+- [App mode](#app-mode)
 - [Fleet Control dashboard](#fleet-control-dashboard)
 - [Phone access](#phone-access)
 - [Configuration](#configuration)
@@ -168,6 +169,7 @@ When a worker meets a contradiction that needs a product choice, it stops and th
 | `ready` | Approved for dispatch | you |
 | `in-progress` | A worker is building it | router |
 | `blocked` | Waiting for your decision | router |
+| `awaiting-merge` | Verified, waiting for your approval to merge (landing `approve`) | router |
 | `in-review` | Pull request open, waiting for a human (PR landing) | merger |
 | `done` | Landed on `main` | merger |
 | `failed` | Retries used up | router |
@@ -196,7 +198,45 @@ Skills live in `.claude/skills/` (`.agents/skills` is a symlink to the same fold
 | Skill | What it does |
 | --- | --- |
 | `/write-tickets` | Turns feature requests into tickets: `rd.md`, `eval.md`, a board row, and `contract.md` for team tickets. Seeds `specs/regression.md` when the repository has none. |
+| `/fleet` | Runs the router inside a Claude desktop app session. See [App mode](#app-mode). |
 | `/setup` | Configures the workflow by interview or by flags (`/setup harness=both preset=hybrid-bridge max_workers=4 dashboard=on tunnel=local`), and installs it into another repository with `install_into=<path>`. |
+
+## App mode
+
+App mode runs the router inside a Claude desktop app session instead of a terminal. Terminal mode is unchanged and stays the default.
+
+**What differs from terminal mode**
+
+- The router is the `/fleet` skill, run in an app session, not `claude --agent router`.
+- Workers are app sessions with their own worktree when the app allows it, and subagents otherwise. The dashboard tags each worker `Session` or `Subagent`, and a session worker gets an `Open in Claude` link when the app reported one.
+- Hooks (`.claude/hooks/fleet-hook.py`) report each worker's activity to the dashboard: last tool, tester and reviewer completion, and a request for attention. A worker with a hook heartbeat older than `watchdog.stallThresholdMinutes` shows as stalled; while one tool call is still running, only after four times that long.
+- Landing is `approve` by default (a project already on `pr` keeps `pr`): a verified ticket waits in `awaiting-merge` until you approve the merge.
+
+**Set up**
+
+```bash
+python3 .claude/scripts/apply-setup.py --runtime app
+```
+
+This registers the seven hook events in `.claude/settings.json` (it merges into an existing file and keeps your other entries), records `runtime: "app"` in the config, and, when you switch from terminal mode, sets `landing: "approve"` if landing was `direct` or not set. A project on `pr` keeps `pr`, and the command says so; pass `--landing approve` to switch. `--runtime terminal` removes the hook entries again. Commit the workov files, including `.claude/settings.json` and `.claude/hooks/`, on `main` first. A worker's worktree is cut from `main` and holds only committed files, and its hooks load from its own copy of the settings.
+
+**Run**
+
+Open the app session in the repository's own folder (the main checkout) and type `/fleet`. A session opened in another folder, even one with a similar name, has neither the `/fleet` skill nor the `worker`, `merger` and `checker` agents. The router starts the dashboard, starts one worker per `ready` ticket (up to `concurrency.maxParallelWorkers`), and verifies finished work against `eval.md` as in terminal mode. Each turn ends with `router-wake.sh` running in the background, so a dashboard action wakes the router without a message from you. The app also notifies the router when a session it started ends its turn. Whether that notification turn may start the next app session is not yet verified (see `docs/superpowers/dry-run-2026-11-12.md` for what the first dry run did and did not cover).
+
+**Sessions and subagents**
+
+The router first tries to start each worker as an app session. The app only allows that on a turn you started. When the app refuses (the error says `Start sessions only on the user's own words`), the router starts the ticket as a subagent with its own worktree instead. Both kinds follow `.claude/agents/worker.md`. The ledger entry in `job/router-state.json` records `kind`, and for a session its `sessionId` and `link`.
+
+- A ticket approved from the dashboard while you are away starts as a subagent, because no turn of yours started it.
+- Whether a worker-finish wake can start the next app session is not yet verified. The subagent fallback covers it either way.
+- A session worker that gets blocked asks in its own session, and the router tells you which one to open.
+
+**The merge gate**
+
+With `landing: "approve"`, a ticket that passes verification gets the board status `awaiting-merge`, and you get an `awaiting_merge` notification. The dashboard card shows the `results.json` summary and the diff stat. **Approve merge** queues `job/control/NNN.json` with `action: "approve_merge"`. The server refuses it unless the ticket is `awaiting-merge`. On the next wake the router runs the merger and then the checker as subagents. The merge is local; nothing is pushed. If the merge fails (conflict, lint or build), the merger undoes it, the ticket goes back to `in-progress` and its worker gets the error, and you must approve again after it is re-verified.
+
+With `landing: "approve"`, a regression fix the reproducer produces is not merged for you: you get a `needs_human` notification naming the branch, and the router merges it only when you say so in the router chat. `direct` and `pr` landing are unchanged.
 
 ## Fleet Control dashboard
 
@@ -281,7 +321,8 @@ A visitor who is not on the machine itself and has no token sees only a sign-in 
 | `concurrency` | 4 workers; ports 3000, 3090, 3101 | `maxParallelWorkers`, `mainPort`, `reproducerPort`, `workerBasePort`. |
 | `dashboard` | on, port 3080, `cloudflared` | `enabled`, `autoStartWithRouter`, `port`, `allowRemoteActions`, `tunnel.provider`. |
 | `budget.defaults` | `usd: 10.0`, `turns: 300` | Per-ticket caps. |
-| `landing` | `direct` | `direct` or `pr`. |
+| `landing` | `direct` | `direct`, `pr` or `approve`. |
+| `runtime` | `terminal` | `terminal` or `app`. See [App mode](#app-mode). |
 | `regression.everyNMerges` | `1` | Full regression sweep after every N merges; `0` turns it off. |
 | `watchdog` | `script`, 60 s, 15 min | `mode`, `intervalSeconds`, `stallThresholdMinutes`. |
 | `notifications.providers` | `[]` | Push providers. |
@@ -296,7 +337,8 @@ A visitor who is not on the machine itself and has no token sees only a sign-in 
 | `--preset NAME`, `--harness claude\|opencode\|both` | Model preset and target harness |
 | `--max-workers N` | Maximum parallel workers |
 | `--budget-usd FLOAT`, `--budget-turns INT` | Default per-ticket caps |
-| `--landing direct\|pr` | Landing mode |
+| `--landing direct\|pr\|approve` | Landing mode |
+| `--runtime terminal\|app` | Where the router runs. `app` registers the fleet hook in `.claude/settings.json` |
 | `--dashboard on\|off`, `--port N` | Dashboard on or off, and its port |
 | `--tunnel cloudflared\|ngrok\|local` | Tunnel provider |
 | `--main-port N`, `--reproducer-port N`, `--worker-base-port N` | Dev-server ports |
@@ -342,6 +384,7 @@ Two projects on one machine need different ports. `apply-setup.py` refuses ports
 
 - **`direct`** (default): the merger merges a verified ticket into `main`.
 - **`pr`**: the merger pushes the branch and opens a GitHub pull request, the ticket waits as `in-review`, and the router polls the pull request until a human merges it. Set it for the project with `--landing pr`, or for one ticket with a `## Landing` section (`- Mode: pr`) in its `rd.md`. It needs `gh` and an `origin` remote.
+- **`approve`**: the merge is the same as `direct`, but a verified ticket waits as `awaiting-merge` until you press **Approve merge** on the dashboard. Set it with `--landing approve` (the default after `--runtime app`, unless landing was already `pr`), or for one ticket with `- Mode: approve` in its `## Landing` section.
 
 ### Notifications
 
@@ -387,6 +430,7 @@ If you paste a secret inline, the next `apply-setup.py` run moves it into `job/n
 | `regression_confirmed` | A regression sweep confirmed a break. |
 | `needs_human` | The router needs you: a decision, an escalation, or a degraded swarm to resume. |
 | `watchdog_stall` | A worker's heartbeat is older than `watchdog.stallThresholdMinutes`. |
+| `awaiting_merge` | A ticket reached the merge gate (status `awaiting-merge`) and waits for your approval. |
 
 ### Supported harnesses
 
@@ -431,7 +475,10 @@ The server listens on all network interfaces, so who may see what is decided per
 │   ├── agents/                  # router, worker, teammate, tester, reviewer, merger, checker, reproducer, watchdog
 │   ├── skills/
 │   │   ├── setup/SKILL.md       # /setup
-│   │   └── write-tickets/SKILL.md   # /write-tickets
+│   │   ├── write-tickets/SKILL.md   # /write-tickets
+│   │   └── fleet/SKILL.md       # /fleet: the router in the Claude desktop app
+│   ├── hooks/
+│   │   └── fleet-hook.py        # reports worker activity to the dashboard in app mode
 │   ├── scripts/
 │   │   ├── install.sh           # install workov into an existing repository
 │   │   ├── apply-setup.py       # write the config, set agent models, generate the OpenCode files
@@ -448,7 +495,7 @@ The server listens on all network interfaces, so who may see what is decided per
 │   ├── dashboard/
 │   │   ├── index.html           # the Fleet Control page
 │   │   └── signin.html          # the sign-in page for remote visitors
-│   └── settings.json            # switches on agent teams for Claude Code
+│   └── settings.json            # switches on agent teams for Claude Code; holds the fleet hook in app mode
 ├── .opencode/agents/            # generated OpenCode agent files
 ├── .agents/skills               # symlink to .claude/skills
 ├── opencode.json                # generated OpenCode project config

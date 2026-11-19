@@ -16,13 +16,14 @@ The two files work as a pair. `rd.md` says what "done" means. `eval.md` proves i
 
 Every surface (board, agents, dashboard server, UI) uses one canonical status enum, and `specs/tickets/BOARD.md` is the single source of truth: the value in its `Status` column is the ticket's state. Derived display state (e.g. a stalled-worker badge) may be computed for rendering but is never persisted to the board.
 
-Statuses: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `done` | `failed` | `budget-exceeded` | `in-review`.
+Statuses: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `awaiting-merge` | `done` | `failed` | `budget-exceeded` | `in-review`.
 
 Who writes each state:
 - `specifying` — `/write-tickets` (this skill), the moment a writer starts a ticket: the board row reserves the number and shows the ticket while it is written. The router never dispatches it.
 - `draft` — `/write-tickets` (this skill), when the writer finishes the ticket.
 - `ready` — the user (or the router on the user's behalf), when approving the ticket for dispatch.
 - `in-progress` / `blocked` — the worker heartbeat, mirrored onto the board by the router.
+- `awaiting-merge` — the router, in landing `approve` mode, when a ticket passed verification and waits for the owner's approval of the merge.
 - `done` — the merger, after the ticket lands on `main` (or `in-review` in PR mode, where the change waits for human review before landing).
 - `failed` / `budget-exceeded` — the router, when a worker cannot recover (repeated failures or exhausted budget).
 
@@ -30,7 +31,7 @@ Who writes each state:
 
 How a verified ticket lands is configurable, and a ticket can override the global setting:
 
-- **Global default**: the `landing` key in `specs/workov.config.json` — `"direct"` (merge straight to `main`, full autopilot; the default) or `"pr"` (the merger pushes the branch and opens a GitHub PR; the ticket waits `in-review` for human review, and the router polls the PR state until it is merged). Set it with `python3 .claude/scripts/apply-setup.py --landing direct|pr`.
+- **Global default**: the `landing` key in `specs/workov.config.json` — `"direct"` (merge straight to `main`, full autopilot; the default) or `"pr"` (the merger pushes the branch and opens a GitHub PR; the ticket waits `in-review` for human review, and the router polls the PR state until it is merged). `"approve"` (app mode: the merge is the same as `direct`, but the ticket waits `awaiting-merge` until the owner approves it from the dashboard). Set it with `python3 .claude/scripts/apply-setup.py --landing direct|pr|approve`.
 - **Per-ticket override**: an optional `## Landing` section in the ticket's `rd.md`:
 
   ```markdown
@@ -128,7 +129,7 @@ Use this exact structure:
 ```markdown
 # NNN: <Feature Title>
 
-**Status:** specifying | draft | ready | in-progress | blocked | done | failed | budget-exceeded | in-review
+**Status:** specifying | draft | ready | in-progress | blocked | awaiting-merge | done | failed | budget-exceeded | in-review
 **Mode:** solo | team
 
 ## Summary
@@ -488,7 +489,7 @@ Create or update `specs/tickets/BOARD.md`:
 ```markdown
 # Ticket Board
 
-Status: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `done` | `failed` | `budget-exceeded` | `in-review`.
+Status: `specifying` | `draft` | `ready` | `in-progress` | `blocked` | `awaiting-merge` | `done` | `failed` | `budget-exceeded` | `in-review`.
 Mode: `solo` (one worker subagent) | `team` (agent team, for foundational or multi-surface tickets).
 Prio: `P0` (critical, dispatched first) | `P1` (default) | `P2` (nice-to-have).
 Runs: `alongside` (no dependencies, safe to run with other tickets) | `waits for NNN: reason`.

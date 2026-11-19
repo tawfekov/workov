@@ -412,7 +412,7 @@ def read_audit_tail(tail: int):
 # issuedAt.
 
 CONTROL_DIR = REPO_ROOT / "job" / "control"
-CONTROL_ACTIONS = ("pause_ticket", "resume_ticket", "stop_worker", "rerun_checker")
+CONTROL_ACTIONS = ("pause_ticket", "resume_ticket", "stop_worker", "rerun_checker", "approve_merge")
 
 
 # Ticket ids are ASCII digits only (>= 3, "013"); [0-9] on purpose, so Unicode
@@ -1440,6 +1440,7 @@ TICKET_STATUSES = (
     "failed",
     "budget-exceeded",
     "in-review",
+    "awaiting-merge",
 )
 
 # Ticket priority enum (ticket 006). P1 is the default: a missing or
@@ -1718,6 +1719,235 @@ def get_swarm_state() -> dict:
         return default
 
 
+_HOOK_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _json_object(text):
+    """The parsed JSON object, or None when the text is not a JSON object. Never raises."""
+    try:
+        doc = json.loads(text)
+    except Exception:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _read_text_or_empty(path) -> str:
+    """The file's text, or "" when it cannot be read. Never raises."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+# Only these hook-status.json fields leave the server (never transcriptPath or sessionId).
+HOOK_PUBLIC_FIELDS = ("kind", "lastTool", "state", "attention", "updatedAt", "lastActivityAt", "toolRunning")
+HOOK_DONE_SUBAGENTS = ("tester", "reviewer")
+# A worker whose hook says a tool is running (PreToolUse seen, no PostToolUse
+# yet) is stalled only after this many stall thresholds without hook activity:
+# one long tool call is work, not a stall.
+HOOK_TOOL_RUNNING_STALL_FACTOR = 4
+
+
+def hook_public_view(doc):
+    """The part of a hook-status.json object that /api/state serves, or None.
+    String fields only, plus `subagentsDone`: which of tester and reviewer have
+    a SubagentStop entry, in that order."""
+    if not isinstance(doc, dict):
+        return None
+    out = {k: (doc.get(k) if isinstance(doc.get(k), str) else None) for k in HOOK_PUBLIC_FIELDS}
+    subagents = doc.get("subagents")
+    seen = {
+        str(s.get("type", "")).strip().lower()
+        for s in (subagents if isinstance(subagents, list) else [])
+        if isinstance(s, dict)
+    }
+    out["subagentsDone"] = [t for t in HOOK_DONE_SUBAGENTS if t in seen]
+    return out
+
+
+def hook_age_seconds(hook, now: float):
+    """Seconds since hook.lastActivityAt (falling back to hook.updatedAt), or None."""
+    if not isinstance(hook, dict):
+        return None
+    for key in ("lastActivityAt", "updatedAt"):
+        raw = hook.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            when = datetime.strptime(raw, _HOOK_TS_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        return max(0, int(now - when.timestamp()))
+    return None
+
+
+def is_ticket_ref(value, tid: str) -> bool:
+    """True when a `ticket` value names ticket `tid`: the id itself or
+    `<id>-slug` (never a bare prefix: 012 vs 0123)."""
+    value = str(value)
+    return value == tid or value.startswith(tid + "-")
+
+
+def worker_belongs_to_ticket(w, tid: str) -> bool:
+    """A heartbeat belongs to a ticket when it is not a writer's and its `ticket` names the id."""
+    return w.get("role") != "writer" and is_ticket_ref(w.get("ticket", ""), tid)
+
+
+def merge_gate_state(ticket_id: str, pipeline=None, pending=None) -> str:
+    """The merge-gate state of a ticket: 'merging' (ledger phase), 'approved'
+    (an approve_merge intent is queued in job/control/<id>.json) or ''.
+    `merging` wins when both hold."""
+    pipeline = get_pipeline_state() if pipeline is None else pipeline
+    if (pipeline.get(ticket_id) or {}).get("phase") == "merging":
+        return "merging"
+    pending = get_pending_intents() if pending is None else pending
+    return "approved" if pending.get(ticket_id) == "approve_merge" else ""
+
+
+# The git results of the merge summary, cached per branch while neither the
+# branch HEAD nor the main HEAD moves: {(kind, branch): ((branch HEAD, main HEAD), value)}.
+_MERGE_GIT_CACHE: dict = {}
+_MERGE_GIT_CACHE_MAX = 1024
+
+
+def merge_cache_sig(branch: str, worktrees):
+    """(branch HEAD, main HEAD) from the worktree list, or None when either
+    commit is not in it (the caller then skips the cache). No git call."""
+    heads = {wt["branch"]: wt["commit"] for wt in worktrees if wt.get("branch") and wt.get("commit")}
+    head, main = heads.get(str(branch or "").strip()), heads.get("main")
+    return (head, main) if head and main else None
+
+
+def _merge_git_cached(kind: str, branch: str, sig, args):
+    """stdout of `git <args>` when it exits 0, else None. A finished run is
+    cached under (kind, branch) for as long as `sig` stays the same; a run that
+    could not finish (timeout, no git) is not cached. Never raises."""
+    key = (kind, branch)
+    if sig is not None:
+        hit = _MERGE_GIT_CACHE.get(key)
+        if hit and hit[0] == sig:
+            return hit[1]
+    try:
+        res = subprocess.run(
+            ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=5,
+        )
+    except Exception:
+        return None
+    value = res.stdout if res.returncode == 0 else None
+    if sig is not None:
+        if len(_MERGE_GIT_CACHE) >= _MERGE_GIT_CACHE_MAX:
+            _MERGE_GIT_CACHE.clear()
+        _MERGE_GIT_CACHE[key] = (sig, value)
+    return value
+
+
+def read_results_doc(ticket, branch: str, wt_path: str, sig=None):
+    """results.json of a ticket as a dict, or None. Sources, in order: the
+    worker's worktree, `git show <branch>:...` (the worker commits results.json
+    on its branch, so it is not in the main checkout until after the merge),
+    then the main checkout. Never raises."""
+    rel = "specs/tickets/{}/results.json".format(str(ticket.get("folder", "")))
+    branch = str(branch or "").strip()
+    sources = []
+    if wt_path:
+        sources.append(lambda: _read_text_or_empty(Path(wt_path) / rel))
+    if branch and not branch.startswith("-"):
+        sources.append(lambda: _merge_git_cached("show:" + rel, branch, sig, ["show", "{}:{}".format(branch, rel)]))
+    sources.append(lambda: _read_text_or_empty(REPO_ROOT / rel))
+    for read in sources:
+        doc = _json_object(read())
+        if doc is not None:
+            return doc
+    return None
+
+
+def find_merge_sources(tid: str, workers, worktrees):
+    """(branch, worktree path) for an awaiting-merge ticket. The worker's
+    heartbeat wins over the worktree list. Without a heartbeat branch, only a
+    fleet worktree (`isFleet`) whose branch carries the ticket number is taken:
+    any other git worktree is never a merge source."""
+    branch, wt_path = "", ""
+    for w in workers:
+        if worker_belongs_to_ticket(w, tid) and w.get("branch"):
+            branch = str(w["branch"])
+            wt_path = str(w.get("worktree") or "")
+            break
+    boundary = re.compile(r"(?<!\d)" + re.escape(tid) + r"(?!\d)")
+    for wt in worktrees:
+        if wt.get("isMain") or not wt.get("branch"):
+            continue
+        if branch:
+            if wt["branch"] == branch:
+                wt_path = wt_path or str(wt.get("path") or "")
+                break
+        elif wt.get("isFleet") is True and boundary.search(wt["branch"]):
+            branch, wt_path = wt["branch"], str(wt.get("path") or "")
+            break
+    return branch, wt_path
+
+
+def read_merge_summary(ticket, branch: str, wt_path: str = "", sig=None):
+    """The /api/state `merge` block of an awaiting-merge ticket. When results.json
+    is missing or corrupt the block still carries the real diffStat, with
+    `automated: null`, zero checks and `resultsMissing: true`; it is None only
+    when neither results nor a branch can be found. `sig` is the cache
+    signature of the branch (merge_cache_sig), None for no cache. Never raises."""
+    try:
+        doc = read_results_doc(ticket, branch, wt_path, sig)
+        if doc is None and not str(branch or "").strip():
+            return None
+        found = doc or {}
+        checks = found.get("checks")
+        checks = checks if isinstance(checks, list) else []
+        reviewer = found.get("reviewer")
+        summary = {
+            "automated": found.get("automated"),
+            "checksPassed": sum(
+                1 for c in checks
+                if isinstance(c, dict) and str(c.get("status", "")).upper() == "PASS"
+            ),
+            "checksTotal": len(checks),
+            "reviewer": reviewer if isinstance(reviewer, str) else "",
+            "diffStat": git_diff_stat_summary(branch, sig),
+        }
+        if doc is None:
+            summary["resultsMissing"] = True
+        return summary
+    except Exception:
+        return None
+
+
+def git_diff_stat_summary(branch: str, sig=None) -> str:
+    """The summary line of `git diff --shortstat main...<branch>`; "" when the branch is unknown or git fails."""
+    branch = str(branch or "").strip()
+    if not branch or branch.startswith("-"):
+        return ""
+    out = _merge_git_cached("stat", branch, sig, ["diff", "--shortstat", f"main...{branch}"])
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def get_ledger_links() -> dict:
+    """{"NNN": link} from the router ledger's `dispatched` entries: only a
+    string `link` starting with claude:// or https:// is passed on. Never
+    raises; a missing or malformed ledger gives {}."""
+    try:
+        ledger = json.loads((REPO_ROOT / "job" / "router-state.json").read_text(encoding="utf-8"))
+        out = {}
+        for e in ledger.get("dispatched") or []:
+            if not isinstance(e, dict):
+                continue
+            n = _ticket_num(e.get("ticket"))
+            link = e.get("link")
+            if n and isinstance(link, str) and link.startswith(("claude://", "https://")):
+                out[n] = link
+            elif n:
+                out.pop(n, None)  # last entry wins
+        return out
+    except Exception:
+        return {}
+
+
 def get_worker_statuses():
     statuses = []
     now = datetime.now(timezone.utc).timestamp()
@@ -1753,6 +1983,7 @@ def get_worker_statuses():
             except Exception:
                 pass
 
+    ledger_links = get_ledger_links()
     for fpath in sorted(candidate_files.keys(), key=str):
         wt_path = candidate_files[fpath]
         if not fpath.is_file():
@@ -1779,6 +2010,11 @@ def get_worker_statuses():
                     )
             data["heartbeatAgeSec"] = age
             data["isActive"] = is_active_phase(data.get("phase"))
+            data["hook"] = hook_public_view(_json_object(_read_text_or_empty(fpath.parent / "hook-status.json")))
+            data["hookAgeSec"] = hook_age_seconds(data["hook"], now)
+            link = ledger_links.get(_ticket_num(data.get("ticket")))
+            if link:
+                data["link"] = link
             # Ticket 070: the file name decides the role (a `role` field inside
             # the file is ignored). A writer goes quiet after 2 x the watchdog
             # stall threshold, and never while it waits for the user.
@@ -1793,6 +2029,12 @@ def get_worker_statuses():
                     phase_l not in ("done", "waiting-user", "")
                     and age > 2 * _get_stall_threshold_seconds()
                 )
+            elif (isinstance(data["hook"], dict) and data["hook"].get("state") == "active"
+                    and data["hookAgeSec"] is not None and data["isActive"]):
+                # App mode: the hook's own activity clock decides for a worker
+                # the hook reports as active; the heartbeat age is not used.
+                factor = HOOK_TOOL_RUNNING_STALL_FACTOR if data["hook"].get("toolRunning") else 1
+                data["isStalled"] = data["hookAgeSec"] > factor * _get_stall_threshold_seconds()
             else:
                 data["isStalled"] = (age > 900) and data["isActive"]
             statuses.append(data)
@@ -1876,7 +2118,7 @@ def merge_worker_budget(worker: dict, dispatched: list, defaults: dict, by_ticke
 
 
 # Ticket 093: `run` on each ticket of /api/state (read only, writes nothing).
-RUN_STATUSES = ("in-progress", "blocked", "in-review", "failed", "budget-exceeded")
+RUN_STATUSES = ("in-progress", "blocked", "in-review", "failed", "budget-exceeded", "awaiting-merge")
 RD_BUDGET_USD_RE = re.compile(r"^- USD:\s*([0-9]+(\.[0-9]+)?)\s*$")
 _RD_BUDGET_CACHE: dict = {}
 _RD_BUDGET_CACHE_MAX = 1024
@@ -2806,6 +3048,9 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                 if wt.get("branch") in ("main", "master"):
                     is_main = True
                 wt["isMain"] = is_main
+                wt["isFleet"] = bool(wt_path) and not is_main and any(
+                    (Path(wt_path) / "job" / m).is_file() for m in ("status.json", "ticket.json")
+                )
                 wt["ticket"] = parse_worktree_ticket_id(wt.get("branch", ""), wt_path)
                 phase = ""
                 if wt_path:
@@ -2837,12 +3082,8 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
 
             for t in tickets:
                 tid = t["id"]
-                matching_workers = [
-                    w for w in workers
-                    if w.get("role") != "writer"
-                    and (str(w.get("ticket", "")) == tid or str(w.get("ticket", "")).startswith(f"{tid}-"))
-                ]
-                if matching_workers and t["status"] != "done":
+                matching_workers = [w for w in workers if worker_belongs_to_ticket(w, tid)]
+                if matching_workers and t["status"] not in ("done", "awaiting-merge"):
                     phases = [str(w.get("phase", "")).lower() for w in matching_workers]
                     if "blocked" in phases:
                         t["status"] = "blocked"
@@ -2853,15 +3094,25 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
             for t in tickets:
                 t["doneAt"] = read_done_at(t)
 
+            # App mode: the merge gate summary of each awaiting-merge ticket.
+            for t in tickets:
+                if t["status"] != "awaiting-merge":
+                    continue
+                branch, wt_path = find_merge_sources(t["id"], workers, worktrees)
+                t["merge"] = read_merge_summary(t, branch, wt_path, merge_cache_sig(branch, worktrees))
+
             # Remote-control pause state (ticket 013): the router ledger's
             # `paused` set is the server-side truth; pending (unconsumed)
             # intents are shown separately.
             paused_ids = get_paused_tickets()
             pending_ids = get_pending_intents()
+            pipeline_state = get_pipeline_state()
             for t in tickets:
                 t["paused"] = t["id"] in paused_ids
                 if t["id"] in pending_ids:
                     t["pendingIntent"] = pending_ids[t["id"]]
+                if t["status"] == "awaiting-merge":
+                    t["mergeState"] = merge_gate_state(t["id"], pipeline_state, pending_ids)
 
             # Live burn (ticket 014, FR-6): every worker gains a `budget`
             # block merged from the ledger, its heartbeat and telemetry.
@@ -2907,7 +3158,7 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                 "worktrees": worktrees,
                 "ports": ports_to_check,
                 "swarm": get_swarm_state(),
-                "pipeline": get_pipeline_state(),
+                "pipeline": pipeline_state,
             }
             state = scrub_live_token(state, get_auth_token())
             self._send_json(200, state)
@@ -3161,6 +3412,11 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                         },
                     )
                     return
+                if new_status == "awaiting-merge":
+                    # The merge gate: only the router puts a ticket there, after it verified the work.
+                    self._audit_action(req, "error:400")
+                    self._send_json(400, {"error": "Cannot set awaiting-merge by hand: only the router sets it, when a ticket passed verification in landing mode approve."})
+                    return
                 # Malformed id (BOARD, "01", traversal, Unicode digits) -> 400.
                 if not is_valid_ticket_id(ticket_id):
                     self._audit_action(req, "error:400")
@@ -3312,8 +3568,7 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                             fpath = Path(fpath_str)
                             try:
                                 wdata = json.loads(fpath.read_text(encoding="utf-8"))
-                                wticket = str(wdata.get("ticket", ""))
-                                if wticket == ticket_id or wticket.startswith(f"{ticket_id}-"):
+                                if is_ticket_ref(wdata.get("ticket", ""), ticket_id):
                                     if wdata.get("phase") == "blocked":
                                         wdata["phase"] = "implementing"
                                         wdata["updatedAt"] = utc_now_iso()
@@ -3472,6 +3727,22 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                     self._audit_action(req, "ok")
                     self._send_json(200, {"ok": True, "ticket": ticket_id, "action": action, "note": "already stopped"})
                     return
+                if action == "approve_merge":
+                    if ticket_status != "awaiting-merge":
+                        # The merge gate: only a ticket waiting at it can be approved.
+                        self._audit_action(req, "error:400")
+                        self._send_json(400, {"error": f"Cannot approve merge for ticket {ticket_id}: status is {ticket_status or 'unknown'}, not awaiting-merge."})
+                        return
+                    gate = merge_gate_state(ticket_id)
+                    if gate == "merging":
+                        self._audit_action(req, "error:409")
+                        self._send_json(409, {"error": f"Merge already in progress for ticket {ticket_id}."})
+                        return
+                    if gate == "approved":
+                        # Idempotent: keep the queued intent (issuedAt, mtime) as is.
+                        self._audit_action(req, "ok")
+                        self._send_json(200, {"ok": True, "ticket": ticket_id, "action": action, "queued": True, "note": "already queued"})
+                        return
                 intent_path = write_control_intent(ticket_id, action)
                 self._audit_action(req, "ok")
                 self._send_json(

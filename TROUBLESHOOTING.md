@@ -26,6 +26,33 @@ Quick reference:
 
 ---
 
+## Session start refused (app mode)
+
+**Symptom:** the router starts a ticket as a subagent instead of a session, or the ledger shows `kind: "subagent"` where you expected `"session"`. The refused call says `Start sessions only on the user's own words`.
+
+**Cause:** the app lets a session start only on a turn you started. A turn woken by `router-wake.sh` (a dashboard approval, a finished worker) is not one, so the app refuses.
+
+**Fix:** none is needed. The router falls back to a subagent with its own worktree, and the work is the same. To get app sessions, type `/fleet` or any message in the router session yourself, and the next dispatch on that turn starts sessions. Any other `start_session` error is reported and leaves the ticket `ready`; read the error text and retry.
+
+## `/fleet` isn't installed in this session
+
+**Symptom:** typing `/fleet` does nothing or is unknown, or the router cannot start a `worker`, `merger` or `checker` and falls back to general-purpose subagents.
+
+**Cause:** the session was opened in a folder other than the repository's own (the main checkout), even one with a similar name. The skill and the agent types live in that repository's `.claude/` folder, so another folder has none of them.
+
+**Fix:** open the app session in the repository's own folder and type `/fleet` there.
+
+## Hooks not firing in a worker (app mode)
+
+**Symptom:** a worker shows no activity, tester or reviewer completion on the dashboard, and `job/hook-status.json` is missing from its worktree.
+
+**Cause and fix, in the order to check:**
+
+1. The workov files are not committed on `main`. A worktree holds only committed files and loads hooks from its own `.claude/settings.json`. Commit `.claude/settings.json` and `.claude/hooks/` on `main`, then start the ticket again.
+2. The hooks are not registered. Run `python3 .claude/scripts/apply-setup.py --runtime app`, and check that `.claude/settings.json` lists the seven fleet-hook events.
+3. The marker is missing or in the wrong place. The hook looks for `job/ticket.json` by walking up from the session's folder. The worker must write it at the root of its working folder as its first step, with valid JSON. Without it the hook does nothing, by design.
+4. Check that `job/ticket.json` exists at the worktree root and parses as JSON. A corrupt marker is silent: the hook does nothing and logs nothing. For other errors, read `job/logs/fleet-hook.log` in the main checkout; the hook always exits 0.
+
 ## Port conflicts
 
 **Symptom.** A worker's dev server fails with `Address already in use`, the tester cannot reach `http://127.0.0.1:310x`, or the dashboard will not start on `:3080`. The watchdog report lists a `ports` entry that is `listening: true` for a port the router was about to assign (or one that went silent for a live worker).

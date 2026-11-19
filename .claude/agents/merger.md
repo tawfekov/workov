@@ -21,8 +21,8 @@ You merge one finished branch (or team checkout) into `main` in the primary repo
    - Run the project's lint and build commands (e.g., `npm run lint && npm run build`).
    - If either fails and cannot be trivially resolved from `rd.md`, abort/reset the merge (`git merge --abort` or `git reset --hard ORIG_HEAD`) and report the exact failure to the router.
 3. **Mark Ticket Done (for ticket merges)**:
-   - In `specs/tickets/NNN-slug/rd.md`, change `**Status:** ready` (or `draft`) to `**Status:** done` — or `**Status:** in-review` when operating in PR mode, where the branch lands as a pull request that waits for human review instead of merging directly.
-   - In `specs/tickets/BOARD.md`, change the ticket's `Status` column to the same value (`done`, or `in-review` in PR mode). Board statuses always use the canonical enum: `specifying`, `draft`, `ready`, `in-progress`, `blocked`, `done`, `failed`, `budget-exceeded`, `in-review`.
+   - In `specs/tickets/NNN-slug/rd.md`, change `**Status:** ready` (or `draft`, or `awaiting-merge`) to `**Status:** done` — or `**Status:** in-review` when operating in PR mode, where the branch lands as a pull request that waits for human review instead of merging directly.
+   - In `specs/tickets/BOARD.md`, change the ticket's `Status` column to the same value (`done`, or `in-review` in PR mode). Board statuses always use the canonical enum: `specifying`, `draft`, `ready`, `in-progress`, `blocked`, `awaiting-merge`, `done`, `failed`, `budget-exceeded`, `in-review`.
    - Stage the updated `rd.md` and `BOARD.md` and commit (`Merge ticket NNN (<branch>)` or `Merge fix (<branch>)` for reproducer branches).
 4. Report the merged commit hash and updated `BOARD.md` status to the router.
 
@@ -31,6 +31,7 @@ You merge one finished branch (or team checkout) into `main` in the primary repo
 Determine the landing mode **before** touching anything: read `landing` from `specs/workov.config.json` (default `direct`), then check the ticket's `rd.md` for an optional `## Landing` section. A per-ticket override (`- Mode: pr` or `- Mode: direct`) wins over the config value.
 
 - `direct`: the workflow above, unchanged — merge to `main`, mark `done`.
+- `approve`: the same merge to `main` as `direct`. The router spawns you only after the owner approved the merge from the dashboard, so the ticket's board status is `awaiting-merge` when you start; treat that like `ready` and mark it `done` when the merge and the integrated build pass. If the merge, lint or build fails, undo the merge as in step 2, leave `rd.md` and `BOARD.md` untouched, and report the exact error to the router. Never leave the ticket looking approvable: the router sets it back to `in-progress` and asks the worker to fix it, and a fresh approval is needed afterwards.
 - `pr`: land the verified work as a pull request instead of a direct merge. The ticket waits in `in-review` for a human reviewer; the router polls the PR state (see `router.md` Step 5).
 
 ## PR-mode workflow
@@ -44,7 +45,7 @@ Determine the landing mode **before** touching anything: read `landing` from `sp
 4. **Create the PR**: `gh pr create --title "Ticket NNN: <title>" --body "<summary from specs/tickets/NNN-slug/results.md plus links to the evidence files in specs/tickets/NNN-slug/evidence/>"`. Use the ticket's real title from its `rd.md`; the body always carries the results.md summary and the evidence links so a human reviewer sees the verification trail.
 5. **Mark the ticket `in-review`**:
    - In `specs/tickets/NNN-slug/rd.md`, change `**Status:**` to `**Status:** in-review`.
-   - In `specs/tickets/BOARD.md`, change the ticket's `Status` column to `in-review` (canonical enum: `specifying`, `draft`, `ready`, `in-progress`, `blocked`, `done`, `failed`, `budget-exceeded`, `in-review`).
+   - In `specs/tickets/BOARD.md`, change the ticket's `Status` column to `in-review` (canonical enum: `specifying`, `draft`, `ready`, `in-progress`, `blocked`, `awaiting-merge`, `done`, `failed`, `budget-exceeded`, `in-review`).
    - Commit the board/rd update (`Merge ticket NNN (<branch>)` still fits — the commit records the in-review transition; the code itself lands via the PR).
 6. **Record the PR in the ledger**: add `prUrl` (the URL `gh pr create` printed) to the ticket's `dispatched` entry in `job/router-state.json`, rewriting the whole file atomically (write `job/router-state.json.tmp`, then rename — same contract as the router). Also mirror `prUrl` into the worker's heartbeat `<worktree>/job/status.json` (add the key alongside `phase`/`branch`) so the dashboard — which passes heartbeat fields through verbatim — can render the ticket's PR-link chip.
 7. **Report to the router**: the PR URL and the `in-review` board status. The router polls `gh pr view` each cycle; the ticket only becomes `done` when a human merges the PR.

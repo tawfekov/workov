@@ -89,6 +89,7 @@ ports and starts again, up to 5 attempts in all.
 """
 
 import argparse
+import contextlib
 import hashlib
 import http.client
 import json
@@ -1110,6 +1111,47 @@ def _header_values(hdrs, name):
     return [v for k, v in hdrs if k.lower() == name.lower()]
 
 
+def check_dashboard_status_maps_complete(ctx: Ctx):
+    # every board status the dashboard knows must be a key of each per-status map
+    # (a missing RING_LOOK key throws in the Ring view)
+    html = (REPO_ROOT / ".claude" / "dashboard" / "index.html").read_text(encoding="utf-8", errors="ignore")
+
+    def literal(name, opener):
+        m = re.search(r"const " + name + r"\s*=\s*" + re.escape(opener), html)
+        if not m:
+            return None
+        close = {"[": "]", "{": "}"}[opener]
+        end = html.find("\n    " + close + (";" if opener == "{" else ""), m.end())
+        end = html.find(close + ";", m.end()) if opener == "[" else end
+        return html[m.end():end] if end > 0 else None
+
+    order_src = literal("STATUS_ORDER", "[")
+    if order_src is None:
+        return FAIL, "STATUS_ORDER literal not found in index.html"
+    order = re.findall(r"'([a-z-]+)'", order_src)
+    problems = []
+    for name in ("STATUS_LAMP", "STAGE_OF_STATUS", "RING_LOOK"):
+        src = literal(name, "{")
+        if src is None:
+            problems.append(name + " literal not found")
+            continue
+        keys = set(re.findall(r"'([a-z-]+)'\s*:", src))
+        # done tickets never take a ring slot, so RING_LOOK has no look for them
+        missing = [s for s in order if s not in keys and not (name == "RING_LOOK" and s == "done")]
+        if missing:
+            problems.append(name + " lacks " + ", ".join(missing))
+    m = re.search(r"TICKET_STATUSES\s*=\s*\(([^)]*)\)", ctx.server_src)
+    server_statuses = re.findall(r'"([a-z-]+)"', m.group(1)) if m else []
+    if not server_statuses:
+        problems.append("TICKET_STATUSES not found in dashboard-server.py")
+    absent = [s for s in server_statuses if s not in order]
+    if absent:
+        problems.append("STATUS_ORDER lacks server status " + ", ".join(absent))
+    if problems:
+        return FAIL, "; ".join(problems)
+    return PASS, "{} statuses present in STATUS_LAMP, STAGE_OF_STATUS and RING_LOOK; all {} server statuses in STATUS_ORDER".format(len(order), len(server_statuses))
+
+
 def check_app_page_csp(ctx: Ctx):
     # ticket 064 FR-1: the app page carries a strict CSP with a fresh nonce
     nonces = []
@@ -1698,6 +1740,298 @@ def check_notify_secrets_migrated(ctx: Ctx):
         shutil.rmtree(work, ignore_errors=True)
 
 
+class RuntimeScratch:
+    """A scratch repo holding a copy of apply-setup.py, a config without `runtime` and (optionally) settings.json."""
+
+    def __init__(self, ctx: Ctx):
+        base = Path("/tmp/opencode")
+        base.mkdir(parents=True, exist_ok=True)
+        self.work = Path(tempfile.mkdtemp(prefix="selftest-runtime-", dir=str(base)))
+        scripts = self.work / ".claude" / "scripts"
+        scripts.mkdir(parents=True)
+        shutil.copy2(ctx.fixture / ".claude" / "scripts" / "apply-setup.py", scripts / "apply-setup.py")
+        self.cfg = self.work / "specs" / "workov.config.json"
+        self.cfg.parent.mkdir(parents=True)
+        config = fixture_config(ctx.port)
+        config.pop("runtime", None)  # a config written before `runtime` existed
+        self.cfg.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        self.settings = self.work / ".claude" / "settings.json"
+
+    def apply(self, *flags):
+        return subprocess.run(
+            [sys.executable, str(self.work / ".claude" / "scripts" / "apply-setup.py"),
+             "--config", str(self.cfg)] + list(flags),
+            cwd=str(self.work), capture_output=True, text=True, timeout=60, check=False)
+
+    def config(self):
+        return json.loads(self.cfg.read_text(encoding="utf-8"))
+
+    def settings_doc(self):
+        return json.loads(self.settings.read_text(encoding="utf-8"))
+
+    def write_settings(self, doc):
+        self.settings.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+    def cleanup(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+
+RUNTIME_HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
+RUNTIME_USER_SETTINGS = {
+    "permissions": {"allow": ["WebSearch"]},
+    "env": {"FOO": "bar", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "5"},
+    "hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}]},
+}
+
+
+def fleet_hook_commands(doc, event):
+    return [h.get("command", "") for g in doc.get("hooks", {}).get(event, []) for h in g.get("hooks", [])
+            if "fleet-hook.py" in h.get("command", "")]
+
+
+def check_config_gains_runtime(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        before = sc.config().get("version")
+        res = sc.apply()
+        if res.returncode != 0:
+            return FAIL, "apply-setup exited {}: {}".format(res.returncode, (res.stdout + res.stderr).strip()[-200:])
+        cfg = sc.config()
+        if cfg.get("version") != before or cfg.get("runtime") != "terminal":
+            return FAIL, "expected version {!r} and runtime terminal, got {!r} / {!r}".format(
+                before, cfg.get("version"), cfg.get("runtime"))
+        return PASS, "a config without runtime got runtime terminal and kept its version"
+    finally:
+        sc.cleanup()
+
+
+def check_runtime_app_sets_defaults(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        for flags, want in ((("--runtime", "app"), "approve"),
+                            (("--runtime", "app", "--landing", "direct"), "direct"),
+                            (("--runtime", "app"), "direct")):
+            res = sc.apply(*flags)
+            if res.returncode != 0:
+                return FAIL, "apply-setup {} exited {}".format(" ".join(flags), res.returncode)
+            cfg = sc.config()
+            if cfg.get("runtime") != "app" or cfg.get("landing") != want:
+                return FAIL, "{}: expected runtime app and landing {}, got {!r} / {!r}".format(
+                    " ".join(flags), want, cfg.get("runtime"), cfg.get("landing"))
+        return PASS, "--runtime app set landing approve; --landing direct stuck, and a repeat --runtime app kept direct"
+    finally:
+        sc.cleanup()
+
+
+def check_runtime_app_keeps_pr_landing(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        if sc.apply("--landing", "pr").returncode != 0 or sc.config().get("landing") != "pr":
+            return FAIL, "could not set landing pr in the scratch config"
+        res = sc.apply("--runtime", "app")
+        cfg = sc.config()
+        if res.returncode != 0 or cfg.get("runtime") != "app" or cfg.get("landing") != "pr":
+            return FAIL, "--runtime app on a pr config: exit {}, runtime {!r}, landing {!r}".format(
+                res.returncode, cfg.get("runtime"), cfg.get("landing"))
+        said = [ln for ln in res.stdout.splitlines() if 'Landing stays "pr"' in ln and "--landing approve" in ln]
+        if len(said) != 1:
+            return FAIL, "expected one line saying landing stays pr and how to switch, got {!r}".format(said)
+        res = sc.apply("--runtime", "app", "--landing", "approve")
+        if res.returncode != 0 or sc.config().get("landing") != "approve":
+            return FAIL, "--landing approve did not switch: {!r}".format(sc.config().get("landing"))
+        return PASS, "--runtime app kept landing pr and said how to switch; --landing approve switched it"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_merge_keeps_existing(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        sc.write_settings(RUNTIME_USER_SETTINGS)
+        res = sc.apply("--runtime", "app")
+        if res.returncode != 0:
+            return FAIL, "apply-setup exited {}".format(res.returncode)
+        doc = sc.settings_doc()
+        if doc.get("permissions") != RUNTIME_USER_SETTINGS["permissions"]:
+            return FAIL, "permissions changed"
+        env = doc.get("env", {})
+        if env.get("FOO") != "bar" or env.get("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH") != "5":
+            return FAIL, "env.FOO or the user's spawn depth changed: {!r}".format(env)
+        if env.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") != "1":
+            return FAIL, "the missing agent-teams env key was not added"
+        post = [h.get("command") for g in doc["hooks"]["PostToolUse"] for h in g["hooks"]]
+        if "echo hi" not in post:
+            return FAIL, "the user's PostToolUse hook is gone"
+        for event in RUNTIME_HOOK_EVENTS:
+            cmds = fleet_hook_commands(doc, event)
+            if cmds != ['python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py" || true']:
+                return FAIL, "{} has fleet hook commands {!r}".format(event, cmds)
+        return PASS, "existing permissions, env and hooks kept; seven fleet hook entries added"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_hook_command_upgraded(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        old = 'python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py"'
+        sc.write_settings({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": old}]}]}})
+        if sc.apply("--runtime", "app").returncode != 0:
+            return FAIL, "--runtime app run failed"
+        doc = sc.settings_doc()
+        want = ['python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py" || true']
+        if fleet_hook_commands(doc, "Stop") != want:
+            return FAIL, "Stop has fleet commands {!r} (expected the upgraded one only)".format(
+                fleet_hook_commands(doc, "Stop"))
+        first = sc.settings.read_bytes()
+        if sc.apply("--runtime", "app").returncode != 0 or sc.settings.read_bytes() != first:
+            return FAIL, "a second run changed settings.json"
+        return PASS, "an old-form fleet entry was replaced in place (no duplicate) and a repeat run changed nothing"
+    finally:
+        sc.cleanup()
+
+
+def check_runtime_app_warns_missing_hook(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    warning = "WARNING: .claude/hooks/fleet-hook.py is missing or not tracked by git"
+    try:
+        res = sc.apply("--runtime", "app")
+        if res.returncode != 0 or warning not in res.stdout:
+            return FAIL, "missing hook file: exit {} and output {!r}".format(res.returncode, res.stdout[-200:])
+        hook = sc.work / ".claude" / "hooks" / "fleet-hook.py"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("# hook\n", encoding="utf-8")
+        res = sc.apply("--runtime", "app")
+        if res.returncode != 0 or warning in res.stdout:
+            return FAIL, "hook present, no git: exit {} and a warning {!r}".format(res.returncode, res.stdout[-200:])
+        subprocess.run(["git", "init", "-q"], cwd=str(sc.work), check=True, capture_output=True)
+        res = sc.apply("--runtime", "app")
+        if res.returncode != 0 or warning not in res.stdout:
+            return FAIL, "untracked hook in a git repo: exit {} and output {!r}".format(res.returncode, res.stdout[-200:])
+        return PASS, "--runtime app warns (exit 0) when the hook file is missing or untracked, and not when present outside git"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_merge_idempotent(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        sc.write_settings(RUNTIME_USER_SETTINGS)
+        if sc.apply("--runtime", "app").returncode != 0:
+            return FAIL, "first --runtime app run failed"
+        first = sc.settings.read_bytes()
+        if sc.apply("--runtime", "app").returncode != 0:
+            return FAIL, "second --runtime app run failed"
+        if sc.settings.read_bytes() != first:
+            return FAIL, "a second --runtime app run changed settings.json"
+        return PASS, "a second --runtime app run left settings.json byte-identical"
+    finally:
+        sc.cleanup()
+
+
+def check_runtime_terminal_removes_hooks(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        sc.write_settings(RUNTIME_USER_SETTINGS)
+        if sc.apply("--runtime", "app").returncode != 0:
+            return FAIL, "--runtime app run failed"
+        if sc.apply("--runtime", "terminal").returncode != 0:
+            return FAIL, "--runtime terminal run failed"
+        doc = sc.settings_doc()
+        left = [e for e in RUNTIME_HOOK_EVENTS if fleet_hook_commands(doc, e)]
+        if left:
+            return FAIL, "fleet hooks remain for: {}".format(", ".join(left))
+        if doc.get("hooks") != RUNTIME_USER_SETTINGS["hooks"]:
+            return FAIL, "the user's hooks are not exactly as before: {!r}".format(doc.get("hooks"))
+        if sc.config().get("runtime") != "terminal":
+            return FAIL, "config runtime is not terminal"
+        return PASS, "--runtime terminal removed the seven fleet entries and kept the user's echo hi hook"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_terminal_noflag_safe(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        # a. a complete user settings file is left byte-identical
+        full = {
+            "permissions": {"allow": ["WebSearch"]},
+            "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
+            "hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}],
+                      "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]},
+        }
+        sc.settings.parent.mkdir(parents=True, exist_ok=True)
+        sc.write_settings(full)
+        before = sc.settings.read_bytes()
+        if sc.apply().returncode != 0:
+            return FAIL, "apply-setup without --runtime failed (case a)"
+        if sc.config().get("runtime") != "terminal":
+            return FAIL, "config runtime is not terminal"
+        if sc.settings.read_bytes() != before:
+            return FAIL, "a no-flag terminal run changed a complete settings.json"
+        # b. a minimal file gains only the two env keys
+        sc.write_settings({"permissions": {"allow": ["WebSearch"]}})
+        if sc.apply().returncode != 0:
+            return FAIL, "apply-setup without --runtime failed (case b)"
+        doc = sc.settings_doc()
+        if doc.get("permissions") != {"allow": ["WebSearch"]} or "hooks" in doc:
+            return FAIL, "case b: permissions changed or a hooks key appeared: {!r}".format(doc)
+        if doc.get("env") != {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+                              "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"}:
+            return FAIL, "case b: env is not exactly the two default keys: {!r}".format(doc.get("env"))
+        # c. the user's own top-level key order is kept
+        sc.write_settings({"model": "x", "permissions": {"allow": ["WebSearch"]}})
+        if sc.apply().returncode != 0:
+            return FAIL, "apply-setup without --runtime failed (case c)"
+        if list(sc.settings_doc()) != ["model", "permissions", "env"]:
+            return FAIL, "case c: top-level key order is {!r}".format(list(sc.settings_doc()))
+        return PASS, "no-flag terminal run: complete file byte-identical; minimal file gains only env; key order kept"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_utf8_and_mode_kept(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        arabic = "Bash(echo \u0645\u0631\u062d\u0628\u0627)"
+        sc.settings.parent.mkdir(parents=True, exist_ok=True)
+        sc.settings.write_text(json.dumps({"permissions": {"allow": [arabic]}}, ensure_ascii=False) + "\n",
+                               encoding="utf-8")
+        os.chmod(sc.settings, 0o600)
+        if sc.apply("--runtime", "app").returncode != 0:
+            return FAIL, "--runtime app run failed"
+        text = sc.settings.read_text(encoding="utf-8")
+        if arabic not in text or "\\u06" in text:
+            return FAIL, "the Arabic permission string was escaped or lost in the rewrite"
+        mode = sc.settings.stat().st_mode & 0o777
+        if mode != 0o600:
+            return FAIL, "settings.json mode is {:o} after the rewrite (expected 600)".format(mode)
+        return PASS, "rewrite kept the Arabic permission as literal characters and mode 0600"
+    finally:
+        sc.cleanup()
+
+
+def check_settings_invalid_json_refused(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        sc.settings.parent.mkdir(parents=True, exist_ok=True)
+        sc.settings.write_text("{not json", encoding="utf-8")
+        before_cfg = sc.cfg.read_bytes()
+        res = sc.apply("--runtime", "app")
+        if res.returncode == 0:
+            return FAIL, "apply-setup exited 0 on an invalid settings.json"
+        if "settings.json" not in res.stderr:
+            return FAIL, "the error does not name settings.json: {!r}".format(res.stderr.strip()[-200:])
+        if sc.settings.read_text(encoding="utf-8") != "{not json":
+            return FAIL, "the invalid settings.json was modified"
+        if sc.cfg.read_bytes() != before_cfg:
+            return FAIL, "the config was written although settings.json was refused"
+        return PASS, "invalid settings.json: non-zero exit naming the file; file and config unchanged"
+    finally:
+        sc.cleanup()
+
+
 # Ticket 077 / 086: find every python3 command in a shell script line and
 # judge whether it is isolated (python3 -I, run from /, or a script by path).
 #
@@ -1857,7 +2191,599 @@ def check_scripts_python_isolated(ctx: Ctx):
 # server checks (it locks the client IP for 10 minutes), and apply-setup /
 # secret-scan need no server at all.
 
+# --- app mode: merge gate, hook data, ticket marker (task 3) -----------------
+
+
+def _post_action(ctx: Ctx, payload, token="default"):
+    return http_request(ctx.port, "POST", "/api/action",
+                        token=ctx.token if token == "default" else token, payload=payload)
+
+
+def _get_state(ctx: Ctx):
+    status, body = http_request(ctx.port, "GET", "/api/state")
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, None
+
+
+class FixtureRestore:
+    """Snapshot files and directories of the fixture; put them back on exit."""
+
+    def __init__(self, *paths):
+        self.paths = [Path(p) for p in paths]
+        self.saved = {p: (p.read_bytes() if p.is_file() else None) for p in self.paths}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        for p, data in self.saved.items():
+            if data is None:
+                if p.is_file():
+                    p.unlink()
+            else:
+                p.write_bytes(data)
+        return False
+
+
+def _merge_gate_guard(ctx: Ctx):
+    tdir = ctx.fixture / "specs" / "tickets"
+    return FixtureRestore(tdir / "BOARD.md", tdir / "999-fixture" / "rd.md",
+                          tdir / "999-fixture" / "results.json",
+                          ctx.fixture / "job" / "control" / "999.json")
+
+
+def _set_awaiting_merge(ctx: Ctx, tid="999"):
+    """Put a ticket at the merge gate the way the router does: in the board row
+    (the dashboard refuses awaiting-merge as a manual status)."""
+    board = ctx.fixture / "specs" / "tickets" / "BOARD.md"
+    text, n = re.subn(r"(?m)^(\|\s*{}\s*\|[^|]*\|)[^|]*\|".format(re.escape(tid)),
+                      lambda m: m.group(1) + " awaiting-merge |", board.read_text(encoding="utf-8"))
+    if n != 1:
+        raise RuntimeError("board row for {} not found".format(tid))
+    board.write_text(text, encoding="utf-8")
+
+
+def _status_of(ctx: Ctx, tid):
+    st, state = _get_state(ctx)
+    got = {t.get("id"): t.get("status") for t in (state or {}).get("tickets", [])}
+    return got.get(tid) if st == 200 else "state {}".format(st)
+
+
+def check_awaiting_merge_status_valid(ctx: Ctx):
+    board = ctx.fixture / "specs" / "tickets" / "BOARD.md"
+    with _merge_gate_guard(ctx):
+        before = board.read_bytes()
+        s, b = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
+        if s != 400 or b"router" not in b:
+            return FAIL, "set_ticket_status awaiting-merge returned {}: {!r} (expected 400)".format(s, b[:200])
+        if board.read_bytes() != before:
+            return FAIL, "the refused set_ticket_status changed the board"
+        _set_awaiting_merge(ctx)
+        if _status_of(ctx, "999") != "awaiting-merge":
+            return FAIL, "/api/state shows 999 as {!r} for a board row in awaiting-merge".format(_status_of(ctx, "999"))
+        s, b = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "ready"})
+        if s != 200 or _status_of(ctx, "999") != "ready":
+            return FAIL, "leaving awaiting-merge by hand returned {}: {!r}".format(s, b[:200])
+    return PASS, ("awaiting-merge refused as a manual status (400, board untouched); a board row in "
+                  "awaiting-merge is returned by /api/state and can be set to ready by hand")
+
+
+def check_approve_merge_requires_awaiting(ctx: Ctx):
+    intent = ctx.fixture / "job" / "control" / "999.json"
+    with _merge_gate_guard(ctx):
+        for status in ("in-progress", "done", "ready"):
+            s, b = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": status})
+            if s != 200:
+                return FAIL, "could not set 999 to {} ({})".format(status, s)
+            s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
+            if s != 400:
+                return FAIL, "approve_merge on a {} ticket returned {} (expected 400)".format(status, s)
+            if status.encode() not in b or b"awaiting-merge" not in b:
+                return FAIL, "the 400 for {} does not name the status: {!r}".format(status, b[:200])
+            if intent.exists():
+                return FAIL, "approve_merge on a {} ticket wrote an intent file".format(status)
+    return PASS, "approve_merge on in-progress, done and ready -> 400 naming the status, no intent file"
+
+
+def check_approve_merge_queues_intent(ctx: Ctx):
+    intent = ctx.fixture / "job" / "control" / "999.json"
+    audit = ctx.fixture / "job" / "audit.jsonl"
+
+    def audit_lines():
+        return len(audit.read_text(encoding="utf-8").splitlines()) if audit.is_file() else 0
+
+    with _merge_gate_guard(ctx):
+        _set_awaiting_merge(ctx)
+        before = audit_lines()
+        s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
+        if s != 200:
+            return FAIL, "approve_merge returned {}: {!r}".format(s, b[:200])
+        try:
+            body = json.loads(b)
+            doc = json.loads(intent.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return FAIL, "response or intent file is not readable JSON"
+        if body.get("queued") is not True:
+            return FAIL, "response lacks queued: true"
+        if doc.get("action") != "approve_merge" or doc.get("by") != "dashboard" or not doc.get("issuedAt"):
+            return FAIL, "intent file is {!r}".format(doc)
+        if audit_lines() != before + 1:
+            return FAIL, "audit grew by {} lines (expected 1)".format(audit_lines() - before)
+    return PASS, "approve_merge on an awaiting-merge ticket -> 200 queued, intent file written, one audit line"
+
+
+def check_approve_merge_requires_token(ctx: Ctx):
+    s, _ = _post_action(ctx, {"action": "approve_merge", "ticket": "999"}, token=None)
+    if s != 401:
+        return FAIL, "approve_merge without a token returned {} (expected 401)".format(s)
+    if (ctx.fixture / "job" / "control" / "999.json").exists():
+        return FAIL, "an unauthenticated approve_merge wrote an intent file"
+    return PASS, "approve_merge without the token -> 401"
+
+
+def _ts_ago(seconds):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+
+
+def _hook_doc(state, age_sec, tool_running=None):
+    return {"version": 1, "ticket": "050", "kind": "session", "sessionId": "s1",
+            "transcriptPath": "/t/s1.jsonl", "startedAt": _ts_ago(age_sec + 60), "lastTool": "Edit",
+            "lastActivityAt": _ts_ago(age_sec), "toolRunning": tool_running,
+            "subagents": [{"type": "reviewer", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "Explore", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "tester", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "tester", "stoppedAt": _ts_ago(age_sec)}],
+            "state": state, "attention": "", "attentionType": "", "updatedAt": _ts_ago(age_sec)}
+
+
+HOOK_SERVED_KEYS = {"kind", "lastTool", "state", "attention", "updatedAt", "lastActivityAt", "toolRunning",
+                    "subagentsDone"}
+
+
+def _hook_worker(ctx: Ctx):
+    st, state = _get_state(ctx)
+    if st != 200 or state is None:
+        return None, st
+    for w in state.get("workers", []):
+        if w.get("ticket") == "050":
+            return w, st
+    return None, st
+
+
+def _with_heartbeat(ctx: Ctx):
+    job = ctx.fixture / "job"
+    return FixtureRestore(job / "status.json", job / "hook-status.json")
+
+
+def _write_heartbeat(ctx: Ctx):
+    (ctx.fixture / "job").mkdir(exist_ok=True)
+    (ctx.fixture / "job" / "status.json").write_text(
+        json.dumps({"ticket": "050", "phase": "building", "task": "hook fixture"}), encoding="utf-8")
+
+
+def check_hook_status_merged(ctx: Ctx):
+    with _with_heartbeat(ctx):
+        _write_heartbeat(ctx)
+        (ctx.fixture / "job" / "hook-status.json").write_text(json.dumps(_hook_doc("active", 30)), encoding="utf-8")
+        w, st = _hook_worker(ctx)
+        if w is None:
+            return FAIL, "no worker for ticket 050 in /api/state ({})".format(st)
+        hook = w.get("hook")
+        if not isinstance(hook, dict) or hook.get("lastTool") != "Edit":
+            return FAIL, "worker hook is {!r}".format(hook)
+        age = w.get("hookAgeSec")
+        if isinstance(age, bool) or not isinstance(age, (int, float)) or not 25 <= age < 120:
+            return FAIL, "hookAgeSec is {!r}".format(age)
+        if set(hook) != HOOK_SERVED_KEYS:
+            return FAIL, "hook carries {!r} (expected only {!r})".format(sorted(hook), sorted(HOOK_SERVED_KEYS))
+        if hook.get("subagentsDone") != ["tester", "reviewer"]:
+            return FAIL, "subagentsDone is {!r}".format(hook.get("subagentsDone"))
+    return PASS, ("worker entry carries hook.lastTool and a numeric hookAgeSec next to the heartbeat phase; only the "
+                  "page's hook fields are served (no sessionId or transcriptPath), with subagentsDone tester, reviewer")
+
+
+def check_hook_stall_rule(ctx: Ctx):
+    with _with_heartbeat(ctx):
+        _write_heartbeat(ctx)
+        hook_path = ctx.fixture / "job" / "hook-status.json"
+        hook_path.write_text(json.dumps(_hook_doc("active", 20 * 60)), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not True:
+            return FAIL, "active hook 20 min old (threshold 15) is not stalled: {!r}".format(w and w.get("isStalled"))
+        if w.get("heartbeatAgeSec", 999) > 60:
+            return FAIL, "fixture heartbeat is not fresh"
+        hook_path.write_text(json.dumps(_hook_doc("idle", 20 * 60)), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not False:
+            return FAIL, "idle hook 20 min old is stalled: {!r}".format(w and w.get("isStalled"))
+        hook_path.write_text(json.dumps(_hook_doc("active", 30)), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not False:
+            return FAIL, "active hook 30 s old is stalled"
+        hook_path.write_text(json.dumps(_hook_doc("active", 20 * 60, "Bash")), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not False:
+            return FAIL, "a tool running for 20 min (threshold 15, limit 60) is stalled"
+        hook_path.write_text(json.dumps(_hook_doc("active", 70 * 60, "Bash")), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not True:
+            return FAIL, "a tool running for 70 min (limit 4 x 15) is not stalled"
+    return PASS, ("active hook past the threshold -> stalled despite a fresh heartbeat; idle or recent -> not stalled; "
+                  "a running tool -> stalled only past 4 x the threshold")
+
+
+def check_hook_stall_requires_active(ctx: Ctx):
+    with _with_heartbeat(ctx):
+        (ctx.fixture / "job").mkdir(exist_ok=True)
+        (ctx.fixture / "job" / "status.json").write_text(
+            json.dumps({"ticket": "050", "phase": "done", "task": "hook fixture"}), encoding="utf-8")
+        (ctx.fixture / "job" / "hook-status.json").write_text(json.dumps(_hook_doc("active", 20 * 60)), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not False:
+            return FAIL, "a done worker with an active hook 20 min old is stalled: {!r}".format(w and w.get("isStalled"))
+    return PASS, "phase done with a stale active hook -> not stalled"
+
+
+def check_hook_status_corrupt_ignored(ctx: Ctx):
+    with _with_heartbeat(ctx):
+        _write_heartbeat(ctx)
+        hook_path = ctx.fixture / "job" / "hook-status.json"
+        for text in ("{{", "[1, 2]"):
+            hook_path.write_text(text, encoding="utf-8")
+            w, st = _hook_worker(ctx)
+            if st != 200 or w is None:
+                return FAIL, "/api/state returned {} with hook-status.json {!r}".format(st, text)
+            if w.get("hook") is not None or w.get("hookAgeSec") is not None:
+                return FAIL, "hook is {!r} for {!r} (expected null)".format(w.get("hook"), text)
+    return PASS, "corrupt or non-object hook-status.json -> hook null, /api/state still 200"
+
+
+def check_merge_summary(ctx: Ctx):
+    results = ctx.fixture / "specs" / "tickets" / "999-fixture" / "results.json"
+    doc = {"ticket": "999", "branch": "feat/999-fixture", "finishedAt": "2026-11-12T10:00:00Z",
+           "automated": {"build": "PASS", "lint": "PASS", "test": "PASS", "typecheck": "SKIP"},
+           "checks": [{"id": "E-1", "status": "PASS"}, {"id": "E-2", "status": "PASS"},
+                      {"id": "E-3", "status": "FAIL"}],
+           "reviewer": "APPROVED", "budget": {}}
+
+    with _merge_gate_guard(ctx):
+        _set_awaiting_merge(ctx)
+        results.write_text(json.dumps(doc), encoding="utf-8")
+        merge = _merge_of(ctx, "999")
+        if not isinstance(merge, dict):
+            return FAIL, "merge is {!r} for a valid results.json".format(merge)
+        if (merge.get("checksTotal"), merge.get("checksPassed"), merge.get("reviewer")) != (3, 2, "APPROVED"):
+            return FAIL, "merge block is {!r}".format(merge)
+        if merge.get("automated") != doc["automated"] or merge.get("diffStat") != "":
+            return FAIL, "automated or diffStat wrong: {!r}".format(merge)
+        results.write_text("{{ not json", encoding="utf-8")
+        merge = _merge_of(ctx, "999")
+        if merge is not None:
+            return FAIL, "merge is {!r} for a corrupt results.json and no branch (expected null, status 200)".format(merge)
+        with _with_heartbeat(ctx):
+            (ctx.fixture / "job" / "status.json").write_text(
+                json.dumps({"ticket": "999", "phase": "done", "branch": "main"}), encoding="utf-8")
+            merge = _merge_of(ctx, "999")
+            want = {"automated": None, "checksPassed": 0, "checksTotal": 0, "reviewer": "",
+                    "diffStat": "", "resultsMissing": True}
+            if merge != want:
+                return FAIL, "merge is {!r} for a corrupt results.json with a branch (expected {!r})".format(merge, want)
+    return PASS, ("valid results.json -> checks 2/3, reviewer APPROVED, empty diffStat; corrupt -> null without a "
+                  "branch, resultsMissing with one")
+
+
+@contextlib.contextmanager
+def _fixture_repo(ctx: Ctx):
+    """Make the fixture a throwaway git repo (branch main, specs/ committed) and
+    remove the repo and its extra worktrees on exit."""
+    extra = Path(tempfile.mkdtemp(prefix="selftest-wt-", dir=str(ctx.fixture.parent)))
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+
+    def git(cwd, *args):
+        res = subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            raise RuntimeError("git {} failed: {}".format(" ".join(args), res.stderr.strip()))
+        return res.stdout
+
+    try:
+        git(ctx.fixture, "init", "-q", "-b", "main")
+        git(ctx.fixture, "add", "specs")
+        git(ctx.fixture, "commit", "-q", "-m", "base")
+        yield git, extra
+    finally:
+        shutil.rmtree(str(ctx.fixture / ".git"), ignore_errors=True)
+        shutil.rmtree(str(extra), ignore_errors=True)
+
+
+def _branch_with_results(git, ctx: Ctx, extra, tid, folder, branch, doc, name):
+    """A worktree <extra>/<name> on <branch> whose commit adds results.json and one source file."""
+    wt = extra / name
+    git(ctx.fixture, "worktree", "add", "-q", "-b", branch, str(wt))
+    tdir = wt / "specs" / "tickets" / folder
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "results.json").write_text(json.dumps(doc), encoding="utf-8")
+    (wt / "src-{}.txt".format(tid)).write_text("work\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "work " + tid)
+    return wt
+
+
+def _merge_of(ctx: Ctx, tid):
+    st, state = _get_state(ctx)
+    if st != 200 or state is None:
+        return "state {}".format(st)
+    for t in state.get("tickets", []):
+        if t.get("id") == tid:
+            return t.get("merge", "missing")
+    return "missing"
+
+
+_RESULTS_3 = {"ticket": "999", "automated": {"build": "PASS"}, "reviewer": "APPROVED",
+              "checks": [{"id": "E-1", "status": "PASS"}, {"id": "E-2", "status": "PASS"},
+                         {"id": "E-3", "status": "FAIL"}]}
+
+
+def check_merge_summary_from_worktree(ctx: Ctx):
+    results = ctx.fixture / "specs" / "tickets" / "999-fixture" / "results.json"
+    with _merge_gate_guard(ctx), _fixture_repo(ctx) as (git, extra):
+        if results.exists():
+            results.unlink()
+        wt = _branch_with_results(git, ctx, extra, "999", "999-fixture", "feat/999-fixture", _RESULTS_3, "wt999")
+        (wt / "job").mkdir()
+        (wt / "job" / "status.json").write_text(
+            json.dumps({"ticket": "999-fixture", "phase": "done", "branch": "feat/999-fixture"}), encoding="utf-8")
+        _set_awaiting_merge(ctx)
+        merge = _merge_of(ctx, "999")
+        if not isinstance(merge, dict) or (merge.get("checksTotal"), merge.get("checksPassed")) != (3, 2):
+            return FAIL, "merge is {!r} for a results.json that lives only in the worktree".format(merge)
+        if not merge.get("diffStat") or merge.get("resultsMissing"):
+            return FAIL, "diffStat or resultsMissing wrong: {!r}".format(merge)
+    return PASS, "results.json only in the worker's worktree -> checks 2/3 and a non-empty diffStat"
+
+
+def check_merge_summary_branch_only(ctx: Ctx):
+    results = ctx.fixture / "specs" / "tickets" / "999-fixture" / "results.json"
+    with _merge_gate_guard(ctx), _fixture_repo(ctx) as (git, extra), _with_heartbeat(ctx):
+        if results.exists():
+            results.unlink()
+        _branch_with_results(git, ctx, extra, "999", "999-fixture", "feat/999-fixture", _RESULTS_3, "wt999")
+        git(ctx.fixture, "worktree", "remove", "--force", str(extra / "wt999"))
+        (ctx.fixture / "job").mkdir(exist_ok=True)
+        (ctx.fixture / "job" / "status.json").write_text(
+            json.dumps({"ticket": "999-fixture", "phase": "done", "branch": "feat/999-fixture"}), encoding="utf-8")
+        _set_awaiting_merge(ctx)
+        merge = _merge_of(ctx, "999")
+        if not isinstance(merge, dict) or (merge.get("checksTotal"), merge.get("checksPassed")) != (3, 2):
+            return FAIL, "merge is {!r} with results only on the branch (git show)".format(merge)
+        if not merge.get("diffStat"):
+            return FAIL, "diffStat is empty: {!r}".format(merge)
+    return PASS, "no worktree on disk, results only via git show of the heartbeat branch -> summary with diffStat"
+
+
+def check_merge_branch_boundary(ctx: Ctx):
+    board = ctx.fixture / "specs" / "tickets" / "BOARD.md"
+    tickets = ctx.fixture / "specs" / "tickets"
+    with _merge_gate_guard(ctx), _fixture_repo(ctx) as (git, extra):
+        text = board.read_text(encoding="utf-8")
+        board.write_text(text + "| 012 | twelve | awaiting-merge | solo | P1 | alongside |\n"
+                         "| 0123 | twelve three | awaiting-merge | solo | P1 | alongside |\n", encoding="utf-8")
+        made = []
+        try:
+            for tid, folder in (("012", "012-twelve"), ("0123", "0123-twelve-three")):
+                (tickets / folder).mkdir()
+                made.append(tickets / folder)
+            git(ctx.fixture, "add", "specs")
+            git(ctx.fixture, "commit", "-q", "-m", "tickets")
+            # 0123 changes two files, 012 changes one: the stat lines differ.
+            wts = {}
+            for tid, folder, branch in (("012", "012-twelve", "feat/012-twelve"),
+                                        ("0123", "0123-twelve-three", "feat/0123-twelve-three")):
+                wt = _branch_with_results(git, ctx, extra, tid, folder, branch, _RESULTS_3, "wt" + tid)
+                if tid == "0123":
+                    (wt / "extra.txt").write_text("more\n", encoding="utf-8")
+                    git(wt, "add", "-A")
+                    git(wt, "commit", "-q", "-m", "more")
+                (wt / "job").mkdir()
+                (wt / "job" / "status.json").write_text(
+                    json.dumps({"ticket": folder, "phase": "done", "branch": branch}), encoding="utf-8")
+                wts[tid] = wt
+            m12, m123 = _merge_of(ctx, "012"), _merge_of(ctx, "0123")
+            if not isinstance(m12, dict) or not isinstance(m123, dict):
+                return FAIL, "merge blocks are {!r} / {!r}".format(m12, m123)
+            if not str(m12.get("diffStat", "")).startswith("2 files changed"):
+                return FAIL, "012 diffStat is {!r} (expected its own 2 files)".format(m12.get("diffStat"))
+            if not str(m123.get("diffStat", "")).startswith("3 files changed"):
+                return FAIL, "0123 diffStat is {!r} (expected its own 3 files)".format(m123.get("diffStat"))
+        finally:
+            for d in made:
+                shutil.rmtree(str(d), ignore_errors=True)
+    return PASS, "tickets 012 and 0123 each get the diff stat of their own branch"
+
+
+def check_merge_source_fleet_only(ctx: Ctx):
+    results = ctx.fixture / "specs" / "tickets" / "999-fixture" / "results.json"
+    with _merge_gate_guard(ctx), _fixture_repo(ctx) as (git, extra):
+        if results.exists():
+            results.unlink()
+        wt = _branch_with_results(git, ctx, extra, "999", "999-fixture", "chore/999-notes", _RESULTS_3, "wt-other")
+        _set_awaiting_merge(ctx)
+        merge = _merge_of(ctx, "999")
+        if merge is not None:
+            return FAIL, "merge is {!r} from a git worktree that is not a fleet worker (expected null)".format(merge)
+        (wt / "job").mkdir()
+        (wt / "job" / "ticket.json").write_text(json.dumps({"ticket": "999"}), encoding="utf-8")
+        merge = _merge_of(ctx, "999")
+        if not isinstance(merge, dict) or merge.get("checksTotal") != 3 or not merge.get("diffStat"):
+            return FAIL, "merge is {!r} from a fleet worktree found by its branch number".format(merge)
+    return PASS, "no heartbeat: a plain git worktree named 999 is not a merge source; one with job/ticket.json is"
+
+
+def check_telemetry_ticket_marker(ctx: Ctx):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "telemetry_under_test", str(ctx.fixture / ".claude" / "scripts" / "telemetry.py"))
+    tele = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tele)
+    work = Path(tempfile.mkdtemp(prefix="selftest-tele-", dir=str(ctx.fixture)))
+    try:
+        root, home = work / "main", work / "home"
+        wt_ok, wt_bad = work / "wt-ok", work / "wt-bad"
+        for d, marker in ((wt_ok, json.dumps({"ticket": "012", "slug": "x", "kind": "session", "main": str(root)})),
+                          (wt_bad, "{{")):
+            (d / "job").mkdir(parents=True)
+            (d / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            (d / "job" / "ticket.json").write_text(marker, encoding="utf-8")
+        root.mkdir()
+        pdir = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(root))
+        pdir.mkdir(parents=True)
+        lines = []
+        for n, (cwd, branch) in enumerate(((wt_ok / "sub", "feat/099-other"), (wt_bad, "feat/077-bad"))):
+            lines.append(json.dumps({
+                "type": "assistant", "timestamp": "2026-11-12T10:00:00Z", "cwd": str(cwd),
+                "gitBranch": branch, "sessionId": "s{}".format(n), "requestId": "r{}".format(n),
+                "message": {"id": "m{}".format(n), "model": "claude-sonnet-4",
+                            "usage": {"input_tokens": 10, "output_tokens": 5}}}))
+        (pdir / "s.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        doc = tele.get_telemetry("all", repo_root=str(root), home=str(home), apply_baseline=False)
+        by_ticket = doc.get("byTicket", {})
+        if "012" not in by_ticket:
+            return FAIL, "the marker ticket 012 is missing from byTicket: {!r}".format(sorted(by_ticket))
+        if "099" in by_ticket:
+            return FAIL, "the branch ticket 099 still won over the marker"
+        if "077" not in by_ticket:
+            return FAIL, "a corrupt marker did not fall back to branch parsing: {!r}".format(sorted(by_ticket))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return PASS, "cwd under a worktree with job/ticket.json -> marker ticket beats branch; corrupt marker -> old logic"
+
+
+def check_notify_events_in_sync(ctx: Ctx):
+    scripts = ctx.fixture / ".claude" / "scripts"
+    setup = (scripts / "apply-setup.py").read_text(encoding="utf-8")
+    notify = (scripts / "notify.sh").read_text(encoding="utf-8")
+    m1 = re.search(r"^NOTIFY_EVENTS = \((.*?)\)", setup, re.S | re.M)
+    m2 = re.search(r"^EVENTS = \[(.*?)\]", notify, re.S | re.M)
+    if not m1 or not m2:
+        return FAIL, "could not find the event list in apply-setup.py or notify.sh"
+    a, b = re.findall(r'"([a-z_]+)"', m1.group(1)), re.findall(r'"([a-z_]+)"', m2.group(1))
+    if sorted(a) != sorted(b):
+        return FAIL, "apply-setup.py has {!r}, notify.sh has {!r}".format(a, b)
+    return PASS, "apply-setup.py and notify.sh list the same {} notify events".format(len(a))
+
+
+def check_notify_awaiting_merge_event(ctx: Ctx):
+    script = ctx.fixture / ".claude" / "scripts" / "notify.sh"
+    env = dict(os.environ, NOTIFY_ROOT=str(ctx.fixture), NOTIFY_CONFIG=str(ctx.fixture / "specs" / "workov.config.json"))
+
+    def run(event):
+        return subprocess.run(["bash", str(script), event, "x", "012"], cwd=str(ctx.fixture), env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
+
+    ok = run("awaiting_merge")
+    if ok.returncode != 0:
+        return FAIL, "awaiting_merge exited {}: {}".format(ok.returncode, ok.stderr.strip()[-200:])
+    bad = run("definitely_not_an_event")
+    if bad.returncode == 0:
+        return FAIL, "an unknown event exited 0"
+    return PASS, "notify.sh awaiting_merge exits 0 with no providers; an unknown event exits {}".format(bad.returncode)
+
+
+def check_worker_link_from_ledger(ctx: Ctx):
+    ledger = ctx.fixture / "job" / "router-state.json"
+    with _with_heartbeat(ctx), FixtureRestore(ledger):
+        _write_heartbeat(ctx)
+        if ledger.is_file():
+            ledger.unlink()
+        w, st = _hook_worker(ctx)
+        if st != 200 or w is None or "link" in w:
+            return FAIL, "missing ledger: status {} link {!r}".format(st, w and w.get("link"))
+        good = "https://claude.ai/code/session_x"
+        for link, want in ((good, good), ("claude://session/x", "claude://session/x"),
+                           ("javascript:alert(1)", None)):
+            ledger.write_text(json.dumps({"dispatched": [{"ticket": "050-hook", "kind": "session",
+                                                          "sessionId": "x", "link": link}]}), encoding="utf-8")
+            w, _ = _hook_worker(ctx)
+            if w is None or w.get("link") != want:
+                return FAIL, "link {!r} served as {!r}".format(link, w and w.get("link"))
+    return PASS, "https:// and claude:// links reach the worker entry; javascript: and a missing ledger give none"
+
+
+def check_approve_merge_refused_when_merging(ctx: Ctx):
+    intent = ctx.fixture / "job" / "control" / "999.json"
+    ledger = ctx.fixture / "job" / "router-state.json"
+    audit = ctx.fixture / "job" / "audit.jsonl"
+    with _merge_gate_guard(ctx), FixtureRestore(ledger, audit):
+        _set_awaiting_merge(ctx)
+        ledger.parent.mkdir(exist_ok=True)
+        ledger.write_text(json.dumps({"dispatched": [{"ticket": "999-fixture", "lastPhase": "merging"}]}), encoding="utf-8")
+        s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
+        if s != 409:
+            return FAIL, "approve_merge while merging returned {} (expected 409): {!r}".format(s, b[:200])
+        try:
+            err = json.loads(b).get("error")
+        except ValueError:
+            err = None
+        if err != "Merge already in progress for ticket 999.":
+            return FAIL, "409 error text is {!r}".format(err)
+        if intent.exists():
+            return FAIL, "a refused approve_merge wrote an intent file"
+        if "error:409" not in audit.read_text(encoding="utf-8").splitlines()[-1]:
+            return FAIL, "the last audit line is not error:409"
+    return PASS, "approve_merge while the ledger says merging -> 409 with the exact text, no intent, audit error:409"
+
+
+def check_approve_merge_idempotent_when_queued(ctx: Ctx):
+    intent = ctx.fixture / "job" / "control" / "999.json"
+    with _merge_gate_guard(ctx):
+        _set_awaiting_merge(ctx)
+        s, _ = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
+        if s != 200:
+            return FAIL, "first approve_merge returned {}".format(s)
+        first = intent.read_bytes()
+        old = time.time() - 120
+        os.utime(str(intent), (old, old))
+        mtime = intent.stat().st_mtime
+        time.sleep(1.1)  # issuedAt has one-second resolution
+        s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
+        if s != 200:
+            return FAIL, "second approve_merge returned {}: {!r}".format(s, b[:200])
+        try:
+            body = json.loads(b)
+        except ValueError:
+            return FAIL, "second response is not JSON"
+        if body.get("note") != "already queued" or body.get("queued") is not True or body.get("ok") is not True:
+            return FAIL, "second response is {!r}".format(body)
+        if intent.read_bytes() != first or intent.stat().st_mtime != mtime:
+            return FAIL, "the second approve_merge rewrote the intent file"
+    return PASS, "a second approve_merge -> 200 'already queued'; the intent file's bytes and mtime are unchanged"
+
+
+def check_worktrees_marked_fleet(ctx: Ctx):
+    with _fixture_repo(ctx) as (git, extra):
+        marked, plain = extra / "wt-marked", extra / "wt-plain"
+        git(ctx.fixture, "worktree", "add", "-q", "-b", "feat/777-marked", str(marked))
+        git(ctx.fixture, "worktree", "add", "-q", "-b", "feat/888-plain", str(plain))
+        (marked / "job").mkdir()
+        (marked / "job" / "ticket.json").write_text(json.dumps({"ticket": "777"}), encoding="utf-8")
+        st, state = _get_state(ctx)
+        if st != 200 or state is None:
+            return FAIL, "state {}".format(st)
+        by = {Path(w.get("path", "")).name: w for w in state.get("worktrees", [])}
+        if by.get("wt-marked", {}).get("isFleet") is not True:
+            return FAIL, "worktree with job/ticket.json is {!r}".format(by.get("wt-marked"))
+        if by.get("wt-plain", {}).get("isFleet") is not False:
+            return FAIL, "worktree without marker is {!r}".format(by.get("wt-plain"))
+        primary = [w for w in state.get("worktrees", []) if w.get("isMain")]
+        if not primary or any(w.get("isFleet") is not False for w in primary):
+            return FAIL, "the primary checkout is not isFleet false: {!r}".format(primary)
+    return PASS, "worktree with a marker isFleet true; one without false; the primary checkout false"
+
+
 RUN_ORDER = [
+    ("dashboard_status_maps_complete", check_dashboard_status_maps_complete),
     ("auth_loopback_read_open", check_auth_loopback_read_open),
     ("state_hides_token", check_state_hides_token),
     ("api_files_hide_token", check_api_files_hide_token),
@@ -1873,6 +2799,26 @@ RUN_ORDER = [
     ("evidence_path_safety", check_evidence_path_safety),
     ("evidence_served_inert", check_evidence_served_inert),
     ("audit_logged", check_audit_logged),
+    ("awaiting_merge_status_valid", check_awaiting_merge_status_valid),
+    ("approve_merge_requires_awaiting", check_approve_merge_requires_awaiting),
+    ("approve_merge_queues_intent", check_approve_merge_queues_intent),
+    ("approve_merge_requires_token", check_approve_merge_requires_token),
+    ("approve_merge_refused_when_merging", check_approve_merge_refused_when_merging),
+    ("approve_merge_idempotent_when_queued", check_approve_merge_idempotent_when_queued),
+    ("worktrees_marked_fleet", check_worktrees_marked_fleet),
+    ("hook_status_merged", check_hook_status_merged),
+    ("hook_stall_rule", check_hook_stall_rule),
+    ("hook_stall_requires_active", check_hook_stall_requires_active),
+    ("hook_status_corrupt_ignored", check_hook_status_corrupt_ignored),
+    ("worker_link_from_ledger", check_worker_link_from_ledger),
+    ("merge_summary", check_merge_summary),
+    ("merge_summary_from_worktree", check_merge_summary_from_worktree),
+    ("merge_summary_branch_only", check_merge_summary_branch_only),
+    ("merge_branch_boundary", check_merge_branch_boundary),
+    ("merge_source_fleet_only", check_merge_source_fleet_only),
+    ("telemetry_ticket_marker", check_telemetry_ticket_marker),
+    ("notify_events_in_sync", check_notify_events_in_sync),
+    ("notify_awaiting_merge_event", check_notify_awaiting_merge_event),
     ("auth_proxied_requires_token", check_auth_proxied_requires_token),
     ("signin_page_for_remote", check_signin_page_for_remote),
     ("app_page_csp", check_app_page_csp),
@@ -1888,6 +2834,17 @@ RUN_ORDER = [
     ("apply_setup_idempotent", check_apply_setup_idempotent),
     ("config_version_compare", check_config_version_compare),
     ("notify_secrets_migrated", check_notify_secrets_migrated),
+    ("config_gains_runtime", check_config_gains_runtime),
+    ("runtime_app_sets_defaults", check_runtime_app_sets_defaults),
+    ("runtime_app_keeps_pr_landing", check_runtime_app_keeps_pr_landing),
+    ("settings_merge_keeps_existing", check_settings_merge_keeps_existing),
+    ("settings_hook_command_upgraded", check_settings_hook_command_upgraded),
+    ("runtime_app_warns_missing_hook", check_runtime_app_warns_missing_hook),
+    ("settings_merge_idempotent", check_settings_merge_idempotent),
+    ("runtime_terminal_removes_hooks", check_runtime_terminal_removes_hooks),
+    ("settings_invalid_json_refused", check_settings_invalid_json_refused),
+    ("settings_terminal_noflag_safe", check_settings_terminal_noflag_safe),
+    ("settings_utf8_and_mode_kept", check_settings_utf8_and_mode_kept),
     ("no_secrets_tracked", check_no_secrets_tracked),
     ("no_live_token_in_files", check_no_live_token_in_files),
     ("no_provider_secrets_in_files", check_no_provider_secrets_in_files),
@@ -1895,6 +2852,8 @@ RUN_ORDER = [
 ]
 CHECK_NAMES = [name for name, _ in RUN_ORDER]
 SERVER_CHECKS = {
+    "awaiting_merge_status_valid", "approve_merge_requires_awaiting", "approve_merge_queues_intent", "approve_merge_requires_token", "approve_merge_refused_when_merging", "approve_merge_idempotent_when_queued", "worktrees_marked_fleet", "hook_status_merged", "hook_stall_rule", "hook_stall_requires_active", "hook_status_corrupt_ignored", "worker_link_from_ledger", "merge_summary",
+    "merge_summary_from_worktree", "merge_summary_branch_only", "merge_branch_boundary", "merge_source_fleet_only",
     "auth_loopback_read_open", "state_hides_token", "api_files_hide_token",
     "auth_post_requires_token",
     "auth_lan_spoof_rejected",

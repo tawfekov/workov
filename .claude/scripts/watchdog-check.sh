@@ -52,8 +52,8 @@
 #   * Ticket 061 liveness gates: every candidate is listed, and one that may
 #     still be in use is kept ("action": "keep" with a reason), never
 #     salvaged, unlocked or removed: an unparseable, fresh, "done" or
-#     "blocked" heartbeat; a ticket that is done, in-review or blocked on the
-#     board; a worktree locked by a live process or by hand; no way to list
+#     "blocked" heartbeat; a ticket that is done, in-review, awaiting-merge or
+#     blocked on the board; a worktree locked by a live process or by hand; no way to list
 #     processes (no /proc, no lsof); a live process whose cwd is inside it.
 #     A Claude Code lock whose process is gone is released before the removal.
 #     --reap-completed keeps a worktree with a live process inside as well.
@@ -1342,7 +1342,7 @@ def main():
             return "heartbeat phase is 'blocked': the worker waits for a user decision", None
         m = re.match(r"^(\d{3})(?:-|$)", hb["raw_ticket"])
         status = board.get(m.group(1)) if m else None
-        if status in ("done", "in-review"):
+        if status in ("done", "in-review", "awaiting-merge"):
             return ("ticket %s is '%s' on specs/tickets/BOARD.md: completed worktrees are reaped only "
                     "by --reap-completed" % (m.group(1), status)), None
         if status == "blocked":
@@ -2064,8 +2064,8 @@ def main():
         candidate_paths.extend(sorted(glob.glob(str(repo_root / pattern))))
 
     # Finished or waiting work is not a stall (ticket 061 FR-7): a heartbeat whose
-    # phase is done, failed or blocked, or whose ticket is done, in-review or
-    # blocked on the board, is reported with a NOTE instead of a WARNING.
+    # phase is done, failed or blocked, or whose ticket is done, in-review,
+    # awaiting-merge or blocked on the board, is reported with a NOTE instead of a WARNING.
     board = _board_statuses()
 
     stalls = []
@@ -2101,7 +2101,7 @@ def main():
             status = board.get(m.group(1)) if m else None
             if phase in ("done", "failed", "blocked"):
                 why = "heartbeat phase is '%s'" % phase
-            elif status in ("done", "in-review", "blocked"):
+            elif status in ("done", "in-review", "awaiting-merge", "blocked"):
                 why = "ticket %s is '%s' on the board" % (m.group(1), status)
             if why:
                 stalled = False

@@ -5,7 +5,7 @@
 #   bash .claude/scripts/notify.sh <event> "<message>" [ticket-id] [--dry-run]
 #
 # Events: worker_blocked budget_exceeded retries_exhausted ticket_done
-#         regression_confirmed needs_human watchdog_stall
+#         regression_confirmed needs_human watchdog_stall awaiting_merge
 #
 # Reads notifications.providers[] from specs/workov.config.json and posts
 # the message to every provider subscribed to <event> (or "all"):
@@ -60,6 +60,7 @@ EVENTS = [
     "regression_confirmed",
     "needs_human",
     "watchdog_stall",
+    "awaiting_merge",
 ]
 MAX_PAYLOAD = 1024          # bytes, whole request body
 LOG_MAX_BYTES = 1024 * 1024  # notify.log is bounded to ~1 MB
@@ -105,6 +106,7 @@ TAGS = {
     "regression_confirmed": "rotating_light",
     "needs_human": "bell",
     "watchdog_stall": "hourglass",
+    "awaiting_merge": "white_check_mark",
 }
 PRIORITY = {
     "worker_blocked": "4",
@@ -114,6 +116,7 @@ PRIORITY = {
     "regression_confirmed": "4",
     "watchdog_stall": "3",
     "ticket_done": "3",
+    "awaiting_merge": "3",
 }
 
 

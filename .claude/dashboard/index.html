@@ -395,6 +395,8 @@ h2.sec .sec-tail { margin-left: auto; display: flex; align-items: center; gap: 8
 .worker-branch { font: var(--fs-label)/1.2 var(--font-mono); color: var(--text-3); margin-left: auto; }
 .worker-metric { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: var(--fs-small); color: var(--text-2); }
 .worker-note { font-size: var(--fs-small); color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.worker-attn { color: var(--lamp-attn); }
+.worker-link { color: var(--lamp-info); }
 .worker-note.open { display: block; }
 .note-more { justify-self: start; }
 .redispatch-hint { font-size: var(--fs-small); color: var(--lamp-stop); }
@@ -567,6 +569,7 @@ pre.doc-pre, pre.log-view, .scroll-pre { font: 13px/1.5 var(--font-mono); backgr
 .drawer-footer { border-top: 1px solid var(--line); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); display: grid; gap: 10px; background: var(--surface-1); flex: none; }
 #drawer-action-container { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 #drawer-action-container .primary { flex: 1; }
+#drawer-action-container .merge-summary { flex-basis: 100%; display: grid; gap: 2px; }
 .prio-label { font: 650 var(--fs-label)/1 var(--font-ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
 .prio-btn { min-width: var(--tap); padding: 0 8px; font-family: var(--font-mono); }
 #drawer-control-container { display: grid; grid-template-columns: 1fr 1fr 16px 1fr; gap: 8px; }
@@ -1160,6 +1163,7 @@ table.stackable { }
         </h2>
         <p class="note-s" style="margin-bottom:10px;">All cost figures are estimates (~ est.).</p>
         <div id="matrix-grid" class="matrix-grid"><div class="empty-box">Loading…</div></div>
+        <div id="other-worktrees-note" class="note-s" style="display:none;margin-top:8px;"></div>
         <div id="completed-wrap" style="display:none;">
           <div id="failed-grid" class="matrix-grid" style="display:none;"></div>
           <button type="button" id="completed-toggle" class="completed-toggle" aria-expanded="false" aria-controls="completed-grid"><span id="completed-toggle-label">0 completed · 0 failed</span> <span id="completed-toggle-arrow" aria-hidden="true">▸</span></button>
@@ -1470,7 +1474,7 @@ table.stackable { }
     let prUrlByTicket = {};
 
     // ===== design constants =====
-    const STATUS_ORDER = ['specifying', 'draft', 'ready', 'in-progress', 'in-review', 'blocked', 'failed', 'budget-exceeded', 'done'];
+    const STATUS_ORDER = ['specifying', 'draft', 'ready', 'in-progress', 'in-review', 'awaiting-merge', 'blocked', 'failed', 'budget-exceeded', 'done'];
     // One lamp map drives lane headers, andon stations, graph nodes, the drawer status plate and the call list.
     const STATUS_LAMP = {
       'specifying':      { lamp: 'info',  lit: true,  label: 'SPECIFYING',      name: 'Specifying' },
@@ -1478,6 +1482,7 @@ table.stackable { }
       'ready':           { lamp: 'ready', lit: false, label: 'READY',           name: 'Ready' },
       'in-progress':     { lamp: 'run',   lit: true,  label: 'IN PROGRESS',     name: 'In Progress' },
       'in-review':       { lamp: 'info',  lit: true,  label: 'IN REVIEW',       name: 'In Review' },
+      'awaiting-merge':  { lamp: 'attn',  lit: true,  label: 'AWAITING MERGE',  name: 'Awaiting merge' },
       'blocked':         { lamp: 'attn',  lit: true,  label: 'BLOCKED',         name: 'Blocked' },
       'failed':          { lamp: 'stop',  lit: true,  label: 'FAILED',          name: 'Failed' },
       'budget-exceeded': { lamp: 'stop',  lit: true,  label: 'BUDGET-EXCEEDED', name: 'Budget-Exceeded' },
@@ -2333,6 +2338,18 @@ table.stackable { }
     // Attach the sub-badge directly after `anchorSel` inside `card`.
     function attachPipelineBadge(card, ticketId, status, anchorSel) {
       const num = pipelineNum(ticketId);
+      const ms = mergeStateOf(ticketId);
+      if (ms) {
+        const anchorEl = card.querySelector(anchorSel);
+        if (anchorEl) {
+          const el = document.createElement('span');
+          el.className = 'pipeline-badge pipeline-merging';
+          el.dataset.ticket = num;
+          el.textContent = ms === 'merging' ? 'merging' : 'merge approved';
+          anchorEl.after(el);
+        }
+        return;
+      }
       const e = pipelineEntryFor(num, status);
       const anchor = e && card.querySelector(anchorSel);
       if (anchor) anchor.after(buildPipelineBadge(num, e));
@@ -2375,8 +2392,14 @@ table.stackable { }
       const m = (stateData && stateData.pendingIntents) || {};
       return m[ticketId] || '';
     }
+    // The server's mergeState of an awaiting-merge ticket: 'merging' (router ledger), 'approved' (intent queued), or ''.
+    // Any other ticket has no mergeState, so this is '' for it.
+    function mergeStateOf(ticketId) {
+      const t = ticketById(ticketId);
+      return (t && t.mergeState) || '';
+    }
     function pendingWord(intent) {
-      return { pause_ticket: 'pause', resume_ticket: 'resume', stop_worker: 'stop' }[intent] || '';
+      return { pause_ticket: 'pause', resume_ticket: 'resume', stop_worker: 'stop', approve_merge: 'approve merge' }[intent] || '';
     }
 
     // ===== agents: classify every worker / worktree row (tickets 025, 026) =====
@@ -2384,7 +2407,9 @@ table.stackable { }
       const rows = [];
       if (!stateData) return rows;
       const workers = (stateData.workers || []).filter(w => !w.superseded);
-      const worktrees = (stateData.worktrees || []).filter(wt => !wt.isMain && !wt.bare);
+      // Only workov worktrees (job/status.json or job/ticket.json) are agents;
+      // any other git worktree is counted in a muted line, never given a ticket number.
+      const worktrees = (stateData.worktrees || []).filter(wt => !wt.isMain && !wt.bare && wt.isFleet === true);
       const mainWtPaths = (stateData.worktrees || []).filter(wt => wt.isMain).map(wt => wt.path);
       const workerByWtPath = {};
       workers.forEach(w => { if (w.worktree) workerByWtPath[w.worktree] = w; });
@@ -2411,6 +2436,16 @@ table.stackable { }
         return 'active';
       }
 
+      // App mode: the tag kind comes from the hook; the link comes from the ledger and is passed on only when it is a safe scheme.
+      function workerKind(w) {
+        const k = String((w && ((w.hook && w.hook.kind) || w.kind)) || '').toLowerCase();
+        return k === 'session' ? 'Session' : (k === 'subagent' ? 'Subagent' : '');
+      }
+      function workerLink(w) {
+        const l = w && w.link;
+        return (typeof l === 'string' && (l.startsWith('claude://') || l.startsWith('https://'))) ? l : '';
+      }
+
       worktrees.forEach(wt => {
         const match = workerByWtPath[wt.path];
         if (!match && (stateData.workers || []).some(w => w.superseded && w.worktree === wt.path)) return;
@@ -2424,6 +2459,7 @@ table.stackable { }
           where: wt.branch || '—', commit: wt.commit || '',
           ageSec: match ? (match.heartbeatAgeSec || 0) : null,
           note: (match && match.note) || '', budget: match ? match.budget : null,
+          kind: workerKind(match), link: workerLink(match), hook: (match && match.hook) || null, hookAgeSec: match ? match.hookAgeSec : null,
         });
       });
 
@@ -2449,6 +2485,7 @@ table.stackable { }
           label, num: pipelineNum(w.ticket), phase: w.phase || 'running',
           where: 'Port :' + (w.port || '3101'), commit: '',
           ageSec: w.heartbeatAgeSec || 0, note: w.note || '', budget: w.budget || null,
+          kind: workerKind(w), link: workerLink(w), hook: w.hook || null, hookAgeSec: w.hookAgeSec,
         });
       });
       return rows;
@@ -2556,16 +2593,20 @@ table.stackable { }
     const STAGE_NAME = { plan: 'Plan', queue: 'Queue', building: 'Building', done: 'Done' };
     const STAGE_OF_STATUS = {
       'specifying': 'plan', 'draft': 'plan', 'ready': 'queue',
-      'in-progress': 'building', 'in-review': 'building', 'blocked': 'building', 'failed': 'building', 'budget-exceeded': 'building',
+      'in-progress': 'building', 'in-review': 'building', 'awaiting-merge': 'building', 'blocked': 'building', 'failed': 'building', 'budget-exceeded': 'building',
       'done': 'done',
     };
-    const NEED_STATUS = ['blocked', 'failed', 'budget-exceeded'];
+    const NEED_STATUS = ['awaiting-merge', 'blocked', 'failed', 'budget-exceeded'];
+    // A ticket needs the owner unless it is an awaiting-merge ticket already approved or merging (same rule as the Needs you strip).
+    function needsOwner(status, id) {
+      return NEED_STATUS.includes(status) && !mergeStateOf(id);
+    }
     // The card's own wording and symbol per status (the lamp comes from STATUS_LAMP).
     const CARD_STATUS_WORD = {
-      'specifying': 'Being written', 'draft': 'Draft', 'ready': 'Ready', 'in-progress': 'In progress', 'in-review': 'In review',
+      'specifying': 'Being written', 'draft': 'Draft', 'ready': 'Ready', 'in-progress': 'In progress', 'in-review': 'In review', 'awaiting-merge': 'Awaiting merge',
       'blocked': 'Blocked', 'failed': 'Failed', 'budget-exceeded': 'Over budget',
     };
-    const CARD_STATUS_SYM = { 'blocked': 'ask', 'failed': 'fail', 'budget-exceeded': 'cap' };
+    const CARD_STATUS_SYM = { 'awaiting-merge': 'ask', 'blocked': 'ask', 'failed': 'fail', 'budget-exceeded': 'cap' };
     const DONE_GROUPS = ['today', 'yesterday', 'earlier'];
     const DONE_GROUP_NAME = { today: 'Today', yesterday: 'Yesterday', earlier: 'Earlier' };
     const stageLampNow = {}; // stage -> [lamp, lit] of the last render: the header and the station show the same lamp
@@ -2578,6 +2619,7 @@ table.stackable { }
       if (stage === 'building') {
         if (has('failed') || has('budget-exceeded')) return ['stop', true];
         if (has('blocked')) return ['attn', true];
+        if (infos.some(d => d.status === 'awaiting-merge' && !mergeStateOf(d.id))) return ['attn', true];
         if (has('in-progress')) return ['run', true];
         if (has('in-review')) return ['info', true];
       }
@@ -2690,6 +2732,7 @@ table.stackable { }
         team: String(ticket.mode || '').toLowerCase() === 'team',
         deps: Array.isArray(ticket.deps) ? ticket.deps.slice() : [],
         paused: serverPaused(ticket.id), pending: pendingWord(pendingIntent(ticket.id)),
+        mergeState: mergeStateOf(ticket.id),
         pr: findPrUrl(ticket.id),
         pipe: e ? [e.phase, e.label, e.updatedAt || ''] : null,
         flag: a ? (a.isDead ? 'dead' : (a.isStalled ? 'stalled ' + shortAge(a.ageSec || 0) : '')) : '',
@@ -2770,9 +2813,9 @@ table.stackable { }
     }
 
     // Order inside a stage (FR-3): a part rank, then priority, then board order (the order of tickets[]).
-    function stagePart(stage, status) {
+    function stagePart(stage, status, id) {
       if (stage === 'plan') return status === 'specifying' ? 1 : 0;
-      if (stage === 'building') return NEED_STATUS.includes(status) ? 0 : (status === 'in-progress' ? 1 : 2);
+      if (stage === 'building') return needsOwner(status, id) ? 0 : (status === 'in-progress' ? 1 : 2);
       return 0;
     }
     // Which Done group a done time falls in: local days, from the clock at this render.
@@ -2855,10 +2898,11 @@ table.stackable { }
         byStage[stageOfStatus(d.status)].push(d);
       });
       ['plan', 'queue', 'building'].forEach(stage => {
-        byStage[stage].sort((a, b) => (stagePart(stage, a.status) - stagePart(stage, b.status))
+        byStage[stage].sort((a, b) => (stagePart(stage, a.status, a.id) - stagePart(stage, b.status, b.id))
           || (prioRank(a.prio) - prioRank(b.prio)) || (a.idx - b.idx));
         byStage[stage] = chainLayout(byStage[stage]); // ticket 093: dependents stand under their blocker
       });
+      planLaneOrder = byStage.plan.map(d => d.id);
       // Done: three groups by local day (the clock at this render), newest first, no known time last.
       const now = new Date();
       const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -2906,7 +2950,7 @@ table.stackable { }
         const col = document.getElementById('stage-' + st);
         setLamp($('.lane-toggle .lamp', col), lampNow[0], lampNow[1]);
         if (st === 'building') {
-          const need = infos.filter(d => NEED_STATUS.includes(d.status)).length;
+          const need = infos.filter(d => needsOwner(d.status, d.id)).length;
           const el = document.getElementById('stage-building-need');
           setText(el, need === 1 ? '· 1 needs you' : '· ' + need + ' need you');
           if (el.hidden !== (need === 0)) el.hidden = need === 0;
@@ -3137,6 +3181,14 @@ table.stackable { }
             spend: b && b.usdBudget ? money(b.estCostUsd) + ' counted of ' + money(b.usdBudget) + ' budget' : '' });
         }
       });
+      tickets.forEach(t => {
+        const num = pipelineNum(t.id);
+        if (String(t.status || '').toLowerCase() === 'awaiting-merge' && !used.has(num)) {
+          used.add(num);
+          if (mergeStateOf(t.id)) return; // approved or merging: nothing left for the owner
+          rows.push({ kind: 'awaiting-merge', ticket: t.id, title: t.title || '', text: 'Ticket ' + t.id + ' is ready to merge' });
+        }
+      });
       agentRows.filter(r => r.isStalled && r.cls === 'active').forEach(r => {
         if (!r.num || used.has(r.num)) return;
         used.add(r.num);
@@ -3148,11 +3200,19 @@ table.stackable { }
       return rows;
     }
 
+    // Opens the first draft ticket in board order, like clicking its card; no draft -> the Plan lane.
+    let planLaneOrder = []; // ticket ids in the order the Plan lane shows them, set by renderLanes
+    function reviewFirstDraft() {
+      const id = planLaneOrder.find(x => String((ticketById(x) || {}).status || '').toLowerCase() === 'draft');
+      if (id) openTicketDrawer(id); else jumpToStage('plan');
+    }
+
     const ATTN_KIND = {
       'decision': { label: 'Decision', tone: 'attn', lamp: 'attn' },
       'worker-dead': { label: 'Worker dead', tone: 'stop', lamp: 'stop' },
       'failed': { label: 'Failed', tone: 'stop', lamp: 'stop' },
       'over-budget': { label: 'Over budget', tone: 'stop', lamp: 'stop' },
+      'awaiting-merge': { label: 'Ready to merge', tone: 'attn', lamp: 'attn' },
       'stalled': { label: 'Stalled', tone: 'attn', lamp: 'attn' },
       'drafts': { label: 'Drafts', tone: 'info', lamp: 'ready' },
     };
@@ -3173,13 +3233,13 @@ table.stackable { }
           h('div', { class: 'head' }, h('span', { class: 'lamp ready', 'aria-hidden': 'true' }), h('span', { class: 'kind info', text: 'Drafts' })),
           h('div', { class: 't', text: r.count + (r.count === 1 ? ' draft waits' : ' drafts wait') + ' for approval' }),
           h('div', { class: 'row-acts' },
-            h('button', { type: 'button', class: 'btn', 'data-fkey': 'row:drafts:review', onclick: () => jumpToStage('plan') }, 'Review')));
+            h('button', { type: 'button', class: 'btn', 'data-fkey': 'row:drafts:review', onclick: () => reviewFirstDraft() }, 'Review')));
       }
       const k = ATTN_KIND[r.kind];
       const kindLabel = r.kind === 'stalled' ? 'Stalled ' + r.age : k.label;
       const q = r.kind === 'decision'
         ? (r.note || 'The worker is waiting for your answer.')
-        : (r.kind === 'worker-dead' ? ((r.note ? r.note + ' ' : '') + 'Re-dispatch pending.') : '');
+        : (r.kind === 'worker-dead' ? ((r.note ? r.note + ' ' : '') + 'Re-dispatch pending.') : (r.kind === 'awaiting-merge' ? r.text : ''));
       const acts = [];
       if (r.kind === 'decision') acts.push(h('button', { type: 'button', class: 'btn primary', 'data-fkey': 'row:decision:' + r.ticket + ':answer', disabled: !authed, onclick: () => openDecisionModal(r.ticket) }, 'Answer'));
       acts.push(h('button', { type: 'button', class: 'btn', 'data-fkey': 'row:' + r.kind + ':' + r.ticket + ':open', onclick: () => openTicketDrawer(r.ticket) }, 'Open'));
@@ -3264,11 +3324,30 @@ table.stackable { }
             onclick: ev => { const open = note.classList.toggle('open'); ev.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false'); ev.currentTarget.textContent = open ? 'less' : 'more'; } }, 'more'));
         }
       }
+      if (r.kind || r.link) {
+        kids.push(h('div', { class: 'worker-metric worker-app' },
+          r.kind ? h('span', { class: 'plate quiet worker-kind', text: r.kind }) : null,
+          r.link ? h('a', { class: 'worker-link', href: r.link, target: '_blank', rel: 'noopener noreferrer', text: 'Open in Claude' }) : null));
+      }
+      if (r.hook) {
+        kids.push(h('div', { class: 'worker-note worker-last', 'data-hook-age': r.key, text: hookLastText(r) }));
+        const done = (Array.isArray(r.hook.subagentsDone) ? r.hook.subagentsDone : [])
+          .map(x => ({ tester: 'Tester done', reviewer: 'Reviewer done' })[x]).filter(Boolean);
+        if (done.length) kids.push(h('div', { class: 'worker-note worker-subagents', text: done.join(' \u00b7 ') }));
+        if (r.hook.state === 'needs-attention' && r.cls === 'active' && !r.isDead) {
+          kids.push(h('div', { class: 'worker-note worker-attn', text: 'Needs attention: ' + (r.hook.attention || '') }));
+        }
+      }
       const b = burnEl(r.budget);
       if (b) kids.push(b);
       if (r.isDead) kids.push(h('div', { class: 'redispatch-hint', text: 'Re-dispatch pending: the router retries per the retry policy' }));
       const card = h('div', { class: 'worker-card ' + (r.isDead ? 'dead' : (r.isStalled ? 'stalled' : '')), 'data-ticket': r.num || r.label }, kids);
       return card;
+    }
+
+    function hookLastText(r) {
+      const hookAge = (typeof r.hookAgeSec === 'number') ? shortAge(r.hookAgeSec) : '';
+      return 'Last: ' + (r.hook.lastTool || 'activity') + (hookAge ? ' \u00b7 ' + hookAge : '');
     }
 
     function ageText(r) {
@@ -3280,7 +3359,9 @@ table.stackable { }
     function renderAgents(rows) {
       const parts = { active: [], completed: [], failed: [] };
       rows.forEach(r => parts[r.cls].push(r));
-      const sigOf = list => JSON.stringify(list.map(r => Object.assign({}, r, { ageSec: null })));
+      // The ages and the hook's own timestamps change on every poll; the ages tick in place below and never rebuild a card.
+      const sigOf = list => JSON.stringify(list.map(r => Object.assign({}, r, { ageSec: null, hookAgeSec: null,
+        hook: r.hook && Object.assign({}, r.hook, { updatedAt: null, lastActivityAt: null }) })));
       const matrix = $('#matrix-grid'), completedGrid = $('#completed-grid'), failedGrid = $('#failed-grid');
       const pipeSig = JSON.stringify(stateData.pipeline || {});
       if (changed('agents:active', sigOf(parts.active) + pipeSig)) {
@@ -3304,8 +3385,9 @@ table.stackable { }
       }
       // Ages tick in place; no node is replaced.
       rows.forEach(r => {
-        const sel = '.age[data-age="' + String(r.key).replace(/"/g, '\\"') + '"]';
-        $$(sel).forEach(el => {
+        const key = String(r.key).replace(/"/g, '\\"');
+        if (r.hook) $$('.worker-last[data-hook-age="' + key + '"]').forEach(el => setText(el, hookLastText(r)));
+        $$('.age[data-age="' + key + '"]').forEach(el => {
           const base = el.getAttribute('data-base') != null ? el.getAttribute('data-base') : el.textContent;
           if (el.getAttribute('data-base') == null) el.setAttribute('data-base', base);
           const a = ageText(r);
@@ -3314,6 +3396,10 @@ table.stackable { }
       });
 
       setText($('#active-worker-count'), `${parts.active.length} Active`);
+      const others = (stateData.worktrees || []).filter(wt => !wt.isMain && !wt.bare && wt.isFleet !== true).length;
+      const otherEl = $('#other-worktrees-note');
+      setText(otherEl, others === 1 ? '1 other git worktree is not shown (not a workov worker).' : (others > 1 ? others + ' other git worktrees are not shown (not workov workers).' : ''));
+      otherEl.style.display = others > 0 ? '' : 'none';
       const wrap = $('#completed-wrap');
       const cc = parts.completed.length, fc = parts.failed.length;
       if (cc + fc > 0) {
@@ -3397,6 +3483,7 @@ table.stackable { }
       'failed': { look: 'lit', sym: 'x', word: 'failed' },
       'budget-exceeded': { look: 'lit', sym: 'coin', word: 'over budget' },
       'in-review': { look: 'lit', sym: 'eye', word: 'in review' },
+      'awaiting-merge': { look: 'lit', sym: 'ask', word: 'awaiting merge' },
       'specifying': { look: 'dashed', sym: 'pencil', word: 'being written' },
       'draft': { look: 'dashed', sym: '', word: 'draft' },
       'ready': { look: 'solid', sym: '', word: 'ready' },
@@ -3470,7 +3557,7 @@ table.stackable { }
       needTickets.forEach(add);
       overflow.forEach(add);
       tickets.filter(t => t.status === 'in-review').forEach(add);
-      tickets.filter(t => t.status === 'in-progress' || t.status === 'blocked' || t.status === 'failed' || t.status === 'budget-exceeded').forEach(add);
+      tickets.filter(t => t.status === 'in-progress' || t.status === 'awaiting-merge' || t.status === 'blocked' || t.status === 'failed' || t.status === 'budget-exceeded').forEach(add);
       const byRank = (a, b) => a.rank - b.rank || a.idx - b.idx;
       const fold = [];
       RING_FOLD.forEach(st => tickets.filter(t => t.status === st && !used.has(t.id)).sort(byRank).forEach(t => fold.push(t)));
@@ -3606,7 +3693,7 @@ table.stackable { }
           h('span', { class: 'ring-lamp', 'data-lamp': k.lamp, 'aria-hidden': 'true' }),
           h('span', { class: 'ring-need-kind', text: r.kind === 'stalled' ? 'Stalled ' + (r.age || '') : k.label }),
           h('span', { class: 'mono tid', text: r.ticket })),
-        h('div', { class: 'ring-need-title', text: r.title || '' }),
+        h('div', { class: 'ring-need-title', text: r.text || r.title || '' }),
         h('button', { type: 'button', class: 'btn', 'data-fkey': 'ring:need:' + r.ticket, 'aria-label': 'Open ticket ' + r.ticket + ': ' + (r.title || ''),
           onclick: () => openTicketDrawer(r.ticket) }, 'Open'));
     }
@@ -3814,7 +3901,7 @@ table.stackable { }
     function graphBandOf(status) {
       const s = String(status || '').toLowerCase();
       if (isStopStatus(s)) return 'stopped';
-      if (s === 'in-progress' || s === 'in-review') return 'flight';
+      if (s === 'in-progress' || s === 'in-review' || s === 'awaiting-merge') return 'flight';
       if (s === 'ready') return 'ready';
       if (s === 'done') return 'done';
       return 'draft';
@@ -5106,6 +5193,27 @@ table.stackable { }
       btn.append(icon(iconName), text);
     }
 
+    function buildMergeSummary(merge) {
+      if (!merge || typeof merge !== 'object' || merge.resultsMissing) {
+        const note = "Results unavailable. Open the ticket's results.md before approving.";
+        const stat = merge && typeof merge === 'object' && merge.diffStat ? [h('div', null, String(merge.diffStat))] : [];
+        return h('div', { class: 'merge-summary note-s' }, [h('div', null, note)].concat(stat));
+      }
+      const auto = merge.automated || {};
+      const lines = [['Build', 'build'], ['Lint', 'lint'], ['Test', 'test'], ['Typecheck', 'typecheck']]
+        .map(([label, key]) => h('div', null, label + ' ' + String(auto[key] || 'SKIP')));
+      lines.push(h('div', null, 'Checks ' + (merge.checksPassed || 0) + '/' + (merge.checksTotal || 0)));
+      lines.push(h('div', null, 'Reviewer ' + String(merge.reviewer || '')));
+      if (merge.diffStat) lines.push(h('div', null, String(merge.diffStat)));
+      return h('div', { class: 'merge-summary note-s' }, lines);
+    }
+
+    async function approveMerge(ticketId) {
+      const ok = await confirmDialog('Merge ticket ' + ticketId + ' into main? Nothing is pushed.', { confirmLabel: 'Approve merge' });
+      if (!ok) return;
+      await postControlAction(ticketId, 'approve_merge');
+    }
+
     function renderActionRow(ticketId) {
       const box = $('#drawer-action-container');
       if (!box) return;
@@ -5114,7 +5222,8 @@ table.stackable { }
       const st = String((t && t.status) || '').toLowerCase();
       const prio = (t && (t.prio === 'P0' || t.prio === 'P2')) ? t.prio : 'P1';
       const decision = needsDecision(ticketId);
-      const sig = [ticketId, authed, st, prio, decision].join('|');
+      const ms = mergeStateOf(ticketId);
+      const sig = [ticketId, authed, st, prio, decision, st === 'awaiting-merge' ? JSON.stringify((t && t.merge) || null) : '', ms].join('|');
       if (box.dataset.sig === sig) return;
       box.dataset.sig = sig;
       box.textContent = '';
@@ -5129,6 +5238,9 @@ table.stackable { }
       box.append(h('span', { class: 'prio-label', text: 'Priority' }), seg);
       if (st === 'draft') {
         box.append(h('button', { type: 'button', class: 'btn primary', disabled: !authed, onclick: () => setTicketStatus(ticketId, 'ready') }, 'Approve & mark ready'));
+      } else if (st === 'awaiting-merge') {
+        const mergeLabel = ms === 'approved' ? 'Merge approved, waiting for the router' : (ms === 'merging' ? 'Merging…' : 'Approve merge');
+        box.append(buildMergeSummary(t && t.merge), h('button', { type: 'button', class: 'btn primary', disabled: !authed || !!ms, onclick: () => approveMerge(ticketId) }, mergeLabel));
       } else if (st === 'specifying') {
         box.append(h('span', { class: 'note-s', text: 'Being written by a ticket writer. Approve it once it is a draft.' }));
       } else if (decision) {
@@ -5208,7 +5320,9 @@ table.stackable { }
         const res = await fetch('/api/action', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ action: action, ticket: ticketId }) });
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
-          const msg = `Queued ${labels[action] || action} for ${ticketId}. The router runs it on its next cycle.`;
+          const msg = action === 'approve_merge'
+            ? 'Merge approved. The router will land it.'
+            : `Queued ${labels[action] || action} for ${ticketId}. The router runs it on its next cycle.`;
           showToast(msg);
           announce(msg);
           await loadAllData();
