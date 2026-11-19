@@ -17,6 +17,7 @@ Ops: dispatch design skip_design review skip_review fix skip_findings missing(ch
 Events (what finished work reports; tick() derives them from files): plan_done design_done worker_done review_result deliver_result
 Side effects that start a process (designer, reviewer, PR) are hooks the caller passes in; without one the transition is still made."""
 import json
+import shutil
 import os
 import re
 import sys
@@ -199,6 +200,38 @@ def spec_complete(root, tid):
     return not hb and not brief.is_file() and (d / "eval.md").is_file()
 
 
+def _mark_mockup_approved(root, tid):
+    """`**Approval:** approved by the owner on <date>` in the ticket header (what mockup_approved() and the worker read)."""
+    d = tdir(root, tid)
+    p = (d / "rd.md") if d else None
+    if not p or not p.is_file():
+        return
+    t = p.read_text(encoding="utf-8")
+    line = "**Approval:** approved by the owner on " + now()[:10]
+    nl = chr(10)
+    head, sep, rest = t.partition(nl + "## ")
+    if re.search(r"^\*\*Approval:\*\*.*$", head, re.M):
+        head = re.sub(r"^\*\*Approval:\*\*.*$", lambda m: line, head, count=1, flags=re.M)
+    elif re.search(r"^\*\*Mockup:\*\*.*$", head, re.M):
+        head = re.sub(r"^(\*\*Mockup:\*\*.*)$", lambda m: m.group(1) + nl + line, head, count=1, flags=re.M)
+    else:
+        head = head.rstrip() + nl + line + nl
+    write_atomic(p, head + sep + rest)
+
+
+def slot_free():
+    """True when one more agent (designer, reviewer, writer, worker) fits the hub's agent limit (wv-sessions.py: pool_cap - slots_used).
+    A designer or reviewer started by a button must not exceed the limit: with no free slot it is queued and tick() starts it when one frees up.
+    Fails open (True) when the count cannot be read."""
+    try:
+        sp = importlib.util.spec_from_file_location("wv_sessions_slots", Path(__file__).resolve().parent / "wv-sessions.py")
+        m = importlib.util.module_from_spec(sp)
+        sp.loader.exec_module(m)
+        return m.pool_cap() - m.slots_used() >= 1
+    except Exception:
+        return True
+
+
 def mockup_approved(root, tid):
     """the owner approved the mockup that is already in the ticket folder: `**Mockup:** approved ...` or `**Approval:** approved ...` in the header"""
     d = tdir(root, tid)
@@ -331,7 +364,15 @@ def review_options(cfg, claude_ok, connected=None, model_list=None):
     for c in cands:
         c["suggested"] = c["id"] == sug
     cands.sort(key=lambda c: (not c["suggested"], c["id"]))
-    return {"claude": {"enabled": bool(claude_ok), "why": "" if claude_ok else "Claude is not signed in or not working right now"}, "models": cands, "suggested": sug}
+    # a reviewer set to Claude on the dashboard (models.reviewer.runtime = "claude") makes Claude the suggested reviewer
+    rv = models.get("reviewer") if isinstance(models.get("reviewer"), dict) else {}
+    cl_sug = bool(claude_ok) and rv.get("runtime") == "claude"
+    cl_model = str((rv.get("claude") or {}).get("model") or "sonnet")
+    if cl_sug:
+        for c in cands:
+            c["suggested"] = False
+        sug = None
+    return {"claude": {"enabled": bool(claude_ok), "why": "" if claude_ok else "Claude is not signed in or not working right now", "suggested": cl_sug, "model": cl_model}, "models": cands, "suggested": sug, "suggestedBy": "claude" if cl_sug else ("model" if sug else "")}
 
 
 # ---------------------------------------------------------------- the actions
@@ -379,8 +420,12 @@ def event(root, tid, name, data=None, hooks=None):
             set_status(root, tid, "todo", stage="todo")
             return 200, {"ok": True, "status": "todo"}
         if name == "design_done" and st == "designing":
-            set_status(root, tid, "todo", stage="todo", design={"state": "done", "at": now()})
-            return 200, {"ok": True, "status": "todo"}
+            if mockup_approved(root, tid):
+                set_status(root, tid, "todo", stage="todo", design={"state": "done", "at": now()})
+                return 200, {"ok": True, "status": "todo"}
+            # the mockup is ready: it waits for the owner (Approve, or Request changes with a note) before the ticket goes to Todo
+            set_status(root, tid, "designing", stage="design", design={"state": "review", "at": now()})
+            return 200, {"ok": True, "status": "designing", "design": "review"}
         if name == "worker_done" and st in ("in-progress", "ready", "blocked"):
             set_status(root, tid, "in-review", stage="review", review=None)
             return 200, {"ok": True, "status": "in-review"}
@@ -417,6 +462,24 @@ def event(root, tid, name, data=None, hooks=None):
     return 409, {"error": "Event " + name + " does not apply to ticket " + tid + " in '" + st + "'."}
 
 
+def paused_set(root):
+    """tickets (3-digit numbers) paused in the project's ledger: the dispatcher starts no worker for them"""
+    return {str(x)[:3] for x in (read_json(Path(root) / "job" / "router-state.json").get("paused") or [])}
+
+
+def set_paused(root, tid, on):
+    """pause or resume one ticket: only the project's ledger list changes (zero tokens). A worker already running is not stopped."""
+    sp = Path(root) / "job" / "router-state.json"
+    d = read_json(sp)
+    cur = [str(x) for x in (d.get("paused") or [])]
+    keep = [x for x in cur if x[:3] != tid[:3]]
+    if on:
+        keep.append(tid[:3])
+    d["paused"] = keep
+    write_atomic(sp, json.dumps(d, indent=2) + "\n")
+    return keep
+
+
 def act(root, tid, op, args=None, hooks=None):
     """An owner action. Returns (http code, body)."""
     args = args or {}
@@ -429,6 +492,12 @@ def act(root, tid, op, args=None, hooks=None):
     def bad(msg):
         return 409, {"error": msg}
     with _LOCK:
+        if op in ("pause", "resume"):
+            on = op == "pause"
+            if on == (tid[:3] in paused_set(root)):
+                return 200, {"ok": True, "paused": on, "note": "Ticket " + tid + (" is already paused." if on else " is not paused.")}
+            set_paused(root, tid, on)
+            return 200, {"ok": True, "paused": on, "note": ("Ticket " + tid + " paused: no new worker starts for it. A worker that is already running keeps going until it ends or you stop it in the Processes view.") if on else ("Ticket " + tid + " resumed: the dispatcher can start its worker again.")}
         if op == "dispatch":
             if st == "draft":
                 set_status(root, tid, "specifying", stage="plan")
@@ -450,11 +519,43 @@ def act(root, tid, op, args=None, hooks=None):
                 return bad("Ticket " + tid + " is '" + st + "', not in Design.")
             if (sf.get("design") or {}).get("state") == "running":
                 return bad("The designer is already working on ticket " + tid + ".")
-            set_status(root, tid, "designing", stage="design", design={"state": "running", "at": now()})
+            if (sf.get("design") or {}).get("state") == "queued":
+                return bad("The designer of ticket " + tid + " is already queued for a free agent slot.")
             fn = getattr(hooks, "design", None) if hooks else None
+            if fn and not slot_free():
+                set_status(root, tid, "designing", stage="design", design={"state": "queued", "at": now()})
+                return 200, {"ok": True, "status": "designing", "note": "All agent slots are busy: the designer starts as soon as one is free."}
+            set_status(root, tid, "designing", stage="design", design={"state": "running", "at": now()})
             if fn:
                 fn(root, tid)
             return 200, {"ok": True, "status": "designing", "note": "The designer started."}
+        if op == "approve_design":
+            if st != "designing" or (sf.get("design") or {}).get("state") != "review":
+                return bad("Ticket " + tid + " has no mockup waiting for approval.")
+            _mark_mockup_approved(root, tid)
+            set_status(root, tid, "todo", stage="todo", design={"state": "done", "at": now()})
+            return 200, {"ok": True, "status": "todo", "note": "Mockup approved."}
+        if op == "design_changes":
+            note = str(args.get("note") or "").strip()
+            if st != "designing" or (sf.get("design") or {}).get("state") not in ("review", "failed"):
+                return bad("Ticket " + tid + " has no mockup to change.")
+            if not note:
+                return bad("Write what to change first.")
+            d = tdir(root, tid)
+            if d and (d / "mockup.html").is_file():
+                shutil.copyfile(d / "mockup.html", d / "mockup.prev.html")  # the designer revises mockup.html; the last one stays for comparison
+            append_rd(root, tid, "Mockup changes requested (" + now() + ")", note[:4000])
+            brief = Path(root) / "job" / "briefs" / (tid + "-design-changes.md")
+            brief.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(brief, "# Mockup changes for ticket " + tid + chr(10) * 2 + "The owner reviewed the mockup and asks for these changes. REVISE the existing `mockup.html` and `mockup-notes.md` in the ticket folder (keep everything that is not mentioned; the previous version is `mockup.prev.html`), run your screenshot check again, and update the notes (list the changes made)." + chr(10) * 2 + "## Owner's changes" + chr(10) * 2 + note[:4000] + chr(10))
+            fn = getattr(hooks, "design", None) if hooks else None
+            if fn and not slot_free():
+                set_status(root, tid, "designing", stage="design", design={"state": "queued", "at": now()})
+                return 200, {"ok": True, "status": "designing", "note": "All agent slots are busy: the designer starts as soon as one is free."}
+            set_status(root, tid, "designing", stage="design", design={"state": "running", "at": now()})
+            if fn:
+                fn(root, tid)
+            return 200, {"ok": True, "status": "designing", "note": "The designer is revising the mockup."}
         if op == "skip_design":
             if st != "designing":
                 return bad("Ticket " + tid + " is '" + st + "', not in Design.")
@@ -464,16 +565,19 @@ def act(root, tid, op, args=None, hooks=None):
         if op in ("review", "review_again"):
             if st != "in-review":
                 return bad("Ticket " + tid + " is '" + st + "', not in Review.")
-            if (sf.get("review") or {}).get("state") == "running":
-                return bad("A review of ticket " + tid + " is already running.")
+            if (sf.get("review") or {}).get("state") in ("running", "queued"):
+                return bad("A review of ticket " + tid + " is already running or queued.")
             by = str(args.get("by") or (sf.get("review") or {}).get("by") or "claude")
             model = str(args.get("model") or "")
             if by == "claude" and not args.get("claudeOk", True):
                 return bad("Claude is not available right now. Review with another model or skip the review.")
             if by == "model" and not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+", model):
                 return bad("Choose a model like provider/model.")
-            set_status(root, tid, "in-review", stage="review", review={"state": "running", "by": by, "model": model, "at": now()}, ask=None)
             fn = getattr(hooks, "review", None) if hooks else None
+            if fn and not slot_free():
+                set_status(root, tid, "in-review", stage="review", review={"state": "queued", "by": by, "model": model, "at": now()}, ask=None)
+                return 200, {"ok": True, "status": "in-review", "note": "All agent slots are busy: the review starts as soon as one is free."}
+            set_status(root, tid, "in-review", stage="review", review={"state": "running", "by": by, "model": model, "at": now()}, ask=None)
             if fn:
                 fn(root, tid, by, model)
             return 200, {"ok": True, "status": "in-review", "note": "Review started (" + (model if by == "model" else "Claude") + ")."}
@@ -613,6 +717,17 @@ def tick(root, live=None, hooks=None):
         tid, st, sf = r["id"], r["status"], load_sf(root, r["id"])
         d = tdir(root, tid)
         ev = None
+        if st == "designing" and (sf.get("design") or {}).get("state") == "queued" and hooks and getattr(hooks, "design", None) and slot_free():
+            set_status(root, tid, "designing", stage="design", design={"state": "running", "at": now()})
+            hooks.design(root, tid)
+            moved.append((tid, "queued designer started"))
+            continue
+        if st == "in-review" and (sf.get("review") or {}).get("state") == "queued" and hooks and getattr(hooks, "review", None) and slot_free():
+            rv = sf.get("review") or {}
+            set_status(root, tid, "in-review", stage="review", review={"state": "running", "by": rv.get("by"), "model": rv.get("model", ""), "at": now()})
+            hooks.review(root, tid, rv.get("by") or "claude", rv.get("model") or "")
+            moved.append((tid, "queued review started"))
+            continue
         if st == "draft" and sf.get("status") == "specifying":
             ev = ("plan_done", {})  # the planner writes `draft` when its spec is finished
         elif st == "in-progress" and tid not in live and d:
@@ -659,15 +774,22 @@ def annotate(root, tickets, ctx=None):
         elif st == "draft":
             acts = [{"op": "dispatch", "label": "Dispatch", "primary": True}]
         elif st == "designing":
-            if (sf.get("design") or {}).get("state") != "running":
+            if (sf.get("design") or {}).get("state") == "review":
+                acts = [{"op": "approve_design", "label": "Approve mockup", "primary": True}, {"op": "design_changes", "type": "changes", "label": "Request changes", "title": "Request changes to the mockup", "hint": "What should the designer change? It revises the mockup and asks you again."}]
+            elif (sf.get("design") or {}).get("state") not in ("running", "queued"):
                 acts = [{"op": "design", "label": "Design", "primary": True}, {"op": "skip_design", "label": "Skip design"}]
         elif st == "todo":
             acts = [{"op": "dispatch", "label": "Dispatch", "primary": True, "disabled": bool(waits), "why": ("Waits for " + ", ".join(waits)) if waits else ""}]
-        elif st == "in-review" and (sf.get("review") or {}).get("state") != "running":
+        elif st == "in-review" and (sf.get("review") or {}).get("state") not in ("running", "queued"):
             acts = [{"op": "review", "type": "review-menu", "label": "Review", "options": ctx.get("reviewOptions")}]
         elif st == "done":
             acts = [{"op": "note", "type": "note", "label": "Re-open with a note"}]
-        t.update({"stage": stg, "needsYou": st in NEED or bool(ask), "ask": ({"kind": ask.get("kind"), "text": ask.get("text")} if ask else None),
+        is_paused = tid[:3] in paused_set(root)
+        if is_paused:
+            acts = [{"op": "resume", "label": "Resume", "primary": True}] + [a for a in acts if a.get("op") not in ("dispatch",)]
+        elif st in ("ready", "in-progress", "specifying"):
+            acts = list(acts) + [{"op": "pause", "label": "Pause"}]
+        t.update({"paused": is_paused, "stage": stg, "needsYou": st in NEED or bool(ask), "ask": ({"kind": ask.get("kind"), "text": ask.get("text")} if ask else None),
                   "waits": waits, "prUrl": sf.get("prUrl") or "", "actions": acts,
                   "stageState": {k: (sf.get(k) or {}).get("state") for k in ("design", "review", "deliver") if sf.get(k)}})
     return tickets

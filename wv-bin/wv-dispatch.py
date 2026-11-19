@@ -33,7 +33,7 @@ ws = st.ws
 
 def hub_cfg():
     hub = ws.read_json(Path.home() / ".workov" / "hub.json").get("root", "")
-    return ws.read_json(Path(hub) / "specs" / "workov.config.json") if hub else {}
+    return ws.read_json(Path(hub) / "specs" / "worker-fleet.config.json") if hub else {}
 
 
 def died_of_rate_limit(base, num):
@@ -46,6 +46,32 @@ def died_of_rate_limit(base, num):
     except OSError:
         return False
     return "HTTP 429" in tail[-1500:]  # the error is the last thing the dead run wrote
+
+
+def claude_limit_until(base, num):
+    """epoch seconds when the Claude plan limit ends, if the last run of this ticket's Claude worker was refused for it (else 0).
+    Claude Code prints `rate_limit_event` lines in its stream: status `rejected` with `resetsAt`. Relaunching before that only wastes a call."""
+    log = Path(base) / "job" / "logs" / (num + "-worker-run.log")
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 400000))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return 0
+    last = None
+    for line in tail.splitlines():
+        if '"rate_limit_event"' in line:
+            try:
+                last = json.loads(line.strip()).get("rate_limit_info") or last
+            except ValueError:
+                pass
+    if last and str(last.get("status", "")).lower().startswith("rejected"):
+        try:
+            return int(last.get("resetsAt") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
 
 
 def due(root, free):
@@ -65,6 +91,8 @@ def due(root, free):
         num, stt, mode, runs = m.group(1), m.group(2), (m.group(3) or "solo"), m.group(4)
         if num in paused or num in busy or mode != "solo":
             continue
+        if time.time() < claude_limit_until(base, num):
+            continue  # its Claude worker was refused by the plan limit: wait for the reset
         if stt == "in-progress":
             ent = ledger.get(num)  # an orphan: its worker is gone (cancelled, crashed) and nothing is dispatching it
             try:
@@ -178,9 +206,70 @@ def choose_model(cfg):
     return min(ok, key=lambda m: load.get(m, 0))
 
 
+def ticket_model(base, slug):
+    """a ticket can pin its worker model in its rd.md header: `**Worker model:** provider/model` (a big or delicate ticket on a stronger model)"""
+    try:
+        head = (Path(base) / "specs" / "tickets" / slug / "rd.md").read_text(encoding="utf-8").split("\n## ", 1)[0]
+    except OSError:
+        return None
+    m = re.search(r"\*\*Worker model:\*\*\s*([A-Za-z0-9._/:-]+)", head)
+    return m.group(1) if m else None
+
+
+def ticket_harness(base, slug):
+    """`**Worker harness:** claude` in a ticket's rd.md header runs its worker on Claude Code (the Claude plan) instead of OpenCode"""
+    try:
+        head = (Path(base) / "specs" / "tickets" / slug / "rd.md").read_text(encoding="utf-8").split("\n## ", 1)[0]
+    except OSError:
+        return None
+    m = re.search(r"\*\*Worker harness:\*\*\s*([A-Za-z]+)", head)
+    return m.group(1).lower() if m else None
+
+
+def worker_runtime(base, slug, cfg):
+    """(runtime, claude model) of a ticket's worker. The ticket header wins (`**Worker harness:** claude|opencode`); else the hub config
+    (models.worker.runtime, set on the dashboard: Providers > Agents). The Claude model is a `**Worker model:**` header without a
+    provider prefix, else models.worker.claude.model, else sonnet."""
+    w = ((cfg or {}).get("models") or {}).get("worker") or {}
+    runtime = ticket_harness(base, slug) or ("claude" if str(w.get("runtime") or "").lower() == "claude" else "opencode")
+    if runtime != "claude":
+        return "opencode", None
+    hm = ticket_model(base, slug)
+    cm = hm if hm and "/" not in hm else str((w.get("claude") or {}).get("model") or "sonnet")
+    return "claude", (cm if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", cm) else "sonnet")
+
+
+def worktree_of(base, slug):
+    """the existing git worktree of the ticket's branch (feat/<slug>), so a worker continues there instead of starting over"""
+    try:
+        out = subprocess.run(["git", "-C", str(base), "worktree", "list", "--porcelain"], capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return None
+    for block in out.replace("\r\n", "\n").split("\n\n"):
+        if ("branch refs/heads/feat/" + slug) in block:
+            m = re.search(r"^worktree (.+)$", block, re.M)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
+def launch_claude(base, num, slug, prompt, env, log, flags, model):
+    """a worker on Claude Code, headless, started in the ticket's own worktree (the project folder is added for the ticket files)"""
+    import shutil
+    claude = shutil.which("claude") or "claude"
+    wt = worktree_of(base, slug) or str(base)
+    extra = (" You are Claude Code running this ticket headless. First read `.claude/agents/worker.md` in the project folder and follow its rules, EXCEPT: do not create a worktree. "
+             "Your worktree already exists: " + wt.replace("\\", "/") + " on branch feat/" + slug + " (it is your current folder): work only there, continue the existing work, never start over and never create another worktree or branch. "
+             "The ticket files (rd.md, eval.md, mockup) and `job/` are in the project folder above; write results.md and results.json into the ticket folder there. "
+             "Run the checks (format, lint, tests, build) yourself, fix what fails, commit on the branch, then stop. Never print or store credentials.")
+    cmd = [claude, "-p", "--model", model, "--permission-mode", "auto", "--output-format", "stream-json", "--verbose",
+           "--add-dir", str(base), "--strict-mcp-config", prompt + extra]
+    subprocess.Popen(cmd, cwd=wt, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags)
+
+
 def launch(root, name, num, slug, dry):
     base = Path(root)
-    cfg = ws.read_json(base / "specs" / "workov.config.json")
+    cfg = ws.read_json(base / "specs" / "worker-fleet.config.json")
     conc = cfg.get("concurrency", {}) or {}
     sp = base / "job" / "router-state.json"
     state = ws.read_json(sp)
@@ -196,14 +285,15 @@ def launch(root, name, num, slug, dry):
               ". Assigned dev server port: " + str(port) + ". Assigned test account: " + account + ". maxTurns: " + str(turns) +
               ". Follow your worker instructions end to end in your own git worktree, write results.md and results.json, then stop. "
               "Never remove a worktree or delete files outside your own worktree.")
-    print(name + ": starting the worker of " + slug + " (port " + str(port) + ", " + account + ")")
+    runtime, cmodel = worker_runtime(base, slug, hub_cfg())
+    print(name + ": starting the worker of " + slug + " (port " + str(port) + ", " + account + (", on Claude " + cmodel if runtime == "claude" else "") + ")")
     if dry:
         return
     opencode = find_opencode()
     prev = next((e for e in ledger if str(e.get("ticket", "")).startswith(num)), None)
     if prev and prev.get("model") and died_of_rate_limit(base, num):
         mark_cooling(prev["model"])
-    model = choose_model(hub_cfg())
+    model = ticket_model(base, slug) or choose_model(hub_cfg())
     env = dict(os.environ)
     wvbin = str(Path.home() / ".wv-bin")
     env["PATH"] = wvbin + os.pathsep + env.get("PATH", "")
@@ -216,8 +306,12 @@ def launch(root, name, num, slug, dry):
     logdir.mkdir(parents=True, exist_ok=True)
     log = open(logdir / (num + "-worker-run.log"), "ab")
     flags = (0x00000008 | 0x00000200 | 0x08000000) if os.name == "nt" else 0
-    subprocess.Popen([opencode, "run", *service_args(opencode), *(["-m", model] if model else []), "--auto", "--agent", "worker", "--title", "Worker for ticket " + num + " " + slug.split("-", 1)[-1].replace("-", " "), prompt],
-                     cwd=str(base), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags)
+    if runtime == "claude":
+        launch_claude(base, num, slug, prompt, env, log, flags, cmodel)
+        model = "claude/" + cmodel
+    else:
+        subprocess.Popen([opencode, "run", *service_args(opencode), *(["-m", model] if model else []), "--auto", "--agent", "worker", "--title", "Worker for ticket " + num + " " + slug.split("-", 1)[-1].replace("-", " "), prompt],
+                         cwd=str(base), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags)
     ent = next((e for e in ledger if str(e.get("ticket", "")).startswith(num)), None)
     if ent is None:
         ent = {"ticket": slug, "agentId": "", "port": port, "account": account, "attempt": 1, "retriesUsed": 0, "maxRetries": 2,

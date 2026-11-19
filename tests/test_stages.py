@@ -76,6 +76,24 @@ class Suggest(unittest.TestCase):
 
 
 class Flow(unittest.TestCase):
+    def test_pause_and_resume(self):
+        r = make([("001", "ready", "alongside"), ("002", "draft", "alongside")])
+        rr = str(r)
+        tk = [{"id": "001", "status": "ready"}, {"id": "002", "status": "draft"}]
+        S.annotate(rr, tk)
+        self.assertFalse(tk[0]["paused"])
+        self.assertIn("pause", [a["op"] for a in tk[0]["actions"]])      # a queued ticket can be paused
+        self.assertEqual(S.act(rr, "001", "pause")[0], 200)
+        S.annotate(rr, tk)
+        self.assertTrue(tk[0]["paused"])
+        self.assertEqual([a["op"] for a in tk[0]["actions"]][0], "resume")  # a paused ticket offers Resume first
+        self.assertFalse(tk[1]["paused"])                                     # the other one is untouched
+        self.assertIn("already paused", S.act(rr, "001", "pause")[1]["note"])   # pausing twice is harmless
+        self.assertEqual(S.act(rr, "001", "resume")[0], 200)
+        S.annotate(rr, tk)
+        self.assertFalse(tk[0]["paused"])
+        self.assertEqual(status(r, "001"), "ready")                           # pausing never changes the stage
+
     def test_happy_with_mockup(self):
         r = make([("001", "draft", "alongside")], mockup="**Mockup:** required")
         rr = str(r)

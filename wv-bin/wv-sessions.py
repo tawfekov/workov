@@ -73,7 +73,7 @@ def pool_cap():
     """the one agent limit: concurrency.maxParallelWorkers of the hub (default 4). Planning, designing, building and review all share it."""
     hub = read_json(Path.home() / ".workov" / "hub.json").get("root", "")
     try:
-        return max(1, min(12, int(read_json(Path(hub) / "specs" / "workov.config.json").get("concurrency", {}).get("maxParallelWorkers") or 4)))
+        return max(1, min(12, int(read_json(Path(hub) / "specs" / "worker-fleet.config.json").get("concurrency", {}).get("maxParallelWorkers") or 4)))
     except (TypeError, ValueError):
         return 4
 
@@ -136,7 +136,8 @@ def worker_procs():
         return None
     if _PROCS["val"] is not None and time.time() - _PROCS["at"] < 5:
         return _PROCS["val"]
-    cmd = "Get-CimInstance Win32_Process -Filter \"Name='opencode.exe'\" | Select-Object CommandLine | ConvertTo-Json -Compress"
+    # OpenCode workers (opencode.exe) and Claude Code workers (claude.exe / node.exe) both carry the dispatcher's prompt on the command line
+    cmd = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'Build ticket [0-9]{3} solo' } | Select-Object CommandLine | ConvertTo-Json -Compress"
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=60).stdout
         d = json.loads(out) if out.strip() else []
@@ -207,7 +208,7 @@ def doomed():
     # the computer runs as many workers at once as the hub allows (concurrency.maxParallelWorkers); the newest ones stay
     hub = read_json(Path.home() / ".workov" / "hub.json").get("root", "")
     try:
-        cap = max(1, int(read_json(Path(hub) / "specs" / "workov.config.json").get("concurrency", {}).get("maxParallelWorkers") or 1))
+        cap = max(1, int(read_json(Path(hub) / "specs" / "worker-fleet.config.json").get("concurrency", {}).get("maxParallelWorkers") or 1))
     except (TypeError, ValueError):
         cap = 1
     for s in sorted(keep, key=lambda x: -x["created"])[cap:]:

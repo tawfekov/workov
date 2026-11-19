@@ -35,7 +35,7 @@ def procs():
 
 def cap():
     hub = ws.read_json(Path.home() / ".workov" / "hub.json").get("root", "")
-    c = ws.read_json(Path(hub) / "specs" / "workov.config.json").get("concurrency", {}) if hub else {}
+    c = ws.read_json(Path(hub) / "specs" / "worker-fleet.config.json").get("concurrency", {}) if hub else {}
     try:
         return max(1, int(c.get("maxParallelWorkers", 1)))
     except (TypeError, ValueError):
@@ -89,6 +89,35 @@ def limit_hit(root, num):
     return 'hit your' in tail and 'limit' in tail and time.time() - log.stat().st_mtime < 5 * 3600
 
 
+def resume_with_answer(root, t, dry):
+    """A planner that ended `waiting-user` asked the owner something. The owner answers in the dashboard (it writes the ticket's
+    user-decision.md); an answer newer than the writer's heartbeat is written to job/briefs/NNN-answers.md and the planner is resumed with it
+    (plan.cjs --resume <session> --answer <file>). Returns True when it started the planner."""
+    base = Path(root)
+    dec = base / "specs" / "tickets" / t["slug"] / "user-decision.md"
+    hbf = base / "job" / ("status-writer-" + t["num"] + ".json")
+    if not dec.is_file() or not hbf.is_file() or dec.stat().st_mtime <= hbf.stat().st_mtime:
+        return False
+    log = base / "job" / "logs" / (t["num"] + "-planner.log")
+    try:
+        ids = re.findall(r"--resume ([0-9a-f-]{36})", log.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+    if not ids:
+        return False
+    text = dec.read_text(encoding="utf-8", errors="replace").split("## Instructions", 1)[-1].strip()
+    print(base.name + ": resuming the writer of " + t["slug"] + " with the owner's answer")
+    if dry:
+        return True
+    ans = base / "job" / "briefs" / (t["num"] + "-answers.md")
+    ans.write_text("The owner's answer to your open questions (from the dashboard):" + chr(10) * 2 + text + chr(10), encoding="utf-8")
+    out = open(base / "job" / ("plan-" + t["num"] + ".out"), "a", encoding="utf-8")
+    flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0
+    subprocess.Popen(["node", ".claude/scripts/plan.cjs", t["slug"], "--resume", ids[-1], "--answer", str(ans.relative_to(base)).replace(chr(92), "/")], cwd=root,
+                     stdout=out, stderr=out, stdin=subprocess.DEVNULL, creationflags=flags)
+    return True
+
+
 def main():
     dry = "--dry" in sys.argv
     items = ws.fleets()
@@ -122,6 +151,9 @@ def main():
                 continue
             if status:
                 print(name, t["num"], st)
+                continue
+            if st == "needs you" and t["phase"] == "waiting-user" and free > 0 and resume_with_answer(root, t, dry):
+                free -= 1  # the owner answered on the dashboard: the planner continues with the answer
                 continue
             if st != "waiting for a slot" or free <= 0:
                 continue
