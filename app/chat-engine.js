@@ -1,4 +1,4 @@
-// Workov chat engine (main process). One live Claude session per chat window, on the Claude plan (the CLI's own login).
+// Workeve chat engine (main process). One live Claude session per chat window, on the Claude plan (the CLI's own login).
 // It loads the user's settings, skills, slash commands, MCP servers and plugins the way Claude Code does, asks for every
 // tool call through Allow/Deny cards, and talks to the page only over local IPC (nothing here is reachable from the tunnel).
 'use strict';

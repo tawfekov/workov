@@ -1,6 +1,6 @@
 // Workov: the Chat tab follows the dashboard's own theme (apply after dashboard-nav-chat.cjs).
 // The dashboard reads its live design tokens (the colours, fonts and corner radii of whatever theme and mode is on now,
-// Andon, Cyberpunk or Gold, dark or light) and hands them to the desktop app, which passes them to the chat view.
+// Andon, Cyberpunk or Tmzm, dark or light) and hands them to the desktop app, which passes them to the chat view.
 // The chat therefore never keeps a theme of its own while it is inside the dashboard.
 const fs = require('fs');
 const H = '.claude/dashboard/index.html';
@@ -14,7 +14,7 @@ if (!h.includes('id="wv-chat-theme-js"')) {
   function snapshot() {
     var cs = getComputedStyle(root), v = {}, t = root.getAttribute('data-theme') || '';
     TOKENS.forEach(function (k) { var x = cs.getPropertyValue('--' + k).trim(); if (x) v[k] = x; });
-    var style = t === 'cyberpunk' || t === 'gold' ? t : 'andon';
+    var style = t === 'cyberpunk' || t === 'tmzm' ? t : 'andon';
     var mode = root.getAttribute('data-mode') || (t === 'light' ? 'light' : t === 'dark' ? 'dark' : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
     // the accent: the theme's brand colour (gold, magenta); Andon's primary button is plain, so its info blue leads there
     v.accent = style === 'andon' ? (v['lamp-info'] || '#6cb1ff') : (v['btn-primary-bg'] || '#c9a14a');

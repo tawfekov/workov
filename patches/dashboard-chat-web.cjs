@@ -14,7 +14,7 @@ if (!h.includes('id="wv-chat-web-js"')) {
   function snapshot() {
     var root = document.documentElement, cs = getComputedStyle(root), v = {}, t = root.getAttribute('data-theme') || '';
     TOKENS.forEach(function (k) { var x = cs.getPropertyValue('--' + k).trim(); if (x) v[k] = x; });
-    var style = t === 'cyberpunk' || t === 'gold' ? t : 'andon';
+    var style = t === 'cyberpunk' || t === 'tmzm' ? t : 'andon';
     var mode = root.getAttribute('data-mode') || (t === 'light' ? 'light' : t === 'dark' ? 'dark' : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
     v.accent = style === 'andon' ? (v['lamp-info'] || '#6cb1ff') : (v['btn-primary-bg'] || '#c9a14a');
     v['accent-text'] = style === 'andon' ? (v['text-on-lamp'] || '#0b1624') : (v['btn-primary-text'] || '#0f0e0b');

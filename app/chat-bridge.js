@@ -33,7 +33,7 @@ function createBridge({ calls, enabled, assetDir, fleetDir }) {
 
   // files from the phone arrive as {name,type,data}: they are written to a temp folder and handed on as paths
   function normalizeFiles(files) {
-    const dir = path.join(os.tmpdir(), 'workov-chat-uploads'); fs.mkdirSync(dir, { recursive: true });
+    const dir = path.join(os.tmpdir(), 'workeve-chat-uploads'); fs.mkdirSync(dir, { recursive: true });
     return (Array.isArray(files) ? files : []).slice(0, 8).map((f) => {
       if (typeof f === 'string') return null; // a path from the phone means nothing on this computer
       if (!f || typeof f.data !== 'string') return null;
@@ -43,7 +43,7 @@ function createBridge({ calls, enabled, assetDir, fleetDir }) {
   }
 
   async function run(call, args) {
-    if (!enabled()) throw Object.assign(new Error('Chat from the phone link is switched off in the Workov app (tray menu).'), { status: 403 });
+    if (!enabled()) throw Object.assign(new Error('Chat from the phone link is switched off in the Workeve app (tray menu).'), { status: 403 });
     if (!REMOTE_CALLS.has(call) || !calls[call]) throw Object.assign(new Error('That chat action is not available from the phone.'), { status: 400 });
     if (call === 'say') args = { text: String((args && args.text) || '').slice(0, 100000), files: normalizeFiles(args && args.files) };
     if (call === 'setPermissionMode' && args === 'bypassPermissions') throw Object.assign(new Error('"Allow all" can only be switched on at the computer.'), { status: 403 });

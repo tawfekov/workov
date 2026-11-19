@@ -1,4 +1,4 @@
-// Workov Chat page. Renders Claude's turn as a timeline, the way the VS Code extension shows it: streamed text, thinking rows,
+// Workeve Chat page. Renders Claude's turn as a timeline, the way the VS Code extension shows it: streamed text, thinking rows,
 // one collapsible row per tool call (diffs for edits, output for commands), a live plan, and Allow/Deny cards.
 'use strict';
 const $ = (id) => document.getElementById(id);
