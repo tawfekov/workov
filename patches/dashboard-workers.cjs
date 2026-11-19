@@ -1,5 +1,5 @@
 // Workov: "Parallel workers" control in Providers > Agents & planner (apply after failover.cjs).
-// Sets concurrency.maxParallelWorkers in specs/workov.config.json (1 to 8). The router reads it each cycle, so a new
+// Sets concurrency.maxParallelWorkers in specs/worker-fleet.config.json (1 to 8). The router reads it each cycle, so a new
 // value applies to the next dispatch. Lowering it never stops a running worker: extra workers finish, nothing new starts.
 const fs = require('fs');
 const S = '.claude/scripts/dashboard-server.py';

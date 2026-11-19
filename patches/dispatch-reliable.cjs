@@ -1,5 +1,5 @@
 // Workov: dispatching works once, and the board tells the truth (apply after dashboard-agentmodels.cjs).
-// Found in a live run: three workers were running while the board showed all three as "ready", because the
+// Found on tickets 009 to 011: three workers were running while the board showed all three as "ready", because the
 // router (a weak free model) skipped its own step of flipping the row to "in-progress"; and "Dispatch now" waited for
 // the router loop's 90 s sleep. So the owner clicked Dispatch five times.
 //  1. the dashboard flips a "ready" row to "in-progress" itself (and rd.md's Status) when the ledger lists the ticket and
