@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # heavy-run.sh <command...>: run one memory-heavy command (install, test, build, lint) while holding a machine-wide lock,
-# so two fleets, or two workers, never run them at the same time. Every `ng test` starts a headless Chromium; three at
-# once, plus installs, ran this machine out of memory. Waits up to WV_HEAVY_WAIT seconds (default 1800) for its turn.
+# so two fleets, or two workers, never run them at the same time. A browser-based test run (`ng test`, a Playwright or
+# Vitest browser run) starts a headless Chromium; three at once, plus installs, ran a machine out of memory. Waits up to WV_HEAVY_WAIT seconds (default 1800) for its turn.
 set -uo pipefail
 [ "$#" -gt 0 ] || { echo "usage: heavy-run.sh <command...>" >&2; exit 2; }
 LOCK="${TMPDIR:-${TEMP:-/tmp}}/wv-heavy.lock"

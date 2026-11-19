@@ -11,7 +11,7 @@ await mod.default.setup({ permission: { hook: async (_name, fn) => { handler = f
 if (!handler) { console.log(JSON.stringify({ inactive: true })); process.exit(0); }
 const out = [];
 for (const command of JSON.parse(commandsJson)) {
-  const event = { action: 'shell', agent: 'worker', resources: [command] };
+  const event = { action: process.env.EVENT_ACTION || 'shell', agent: 'worker', resources: [command] };
   const p = handler(event);
   if (peek) {
     const state = await Promise.race([p.then(() => 'done'), new Promise((r) => setTimeout(() => r('waiting'), 2500))]);

@@ -159,6 +159,7 @@ export default define({
         try { fs.appendFileSync(path.join(root, 'job', 'subagent-seen.log'), JSON.stringify({ at: new Date().toISOString(), agent: event.agent || null, resources: what.slice(0, 200) }) + '\n'); } catch { /* best effort */ }
         if (/\b(worker|teammate|implementer)\b/i.test(what)) {
           try {
+            if (!fs.existsSync(path.join(os.homedir(), '.wv-bin', 'wv-sessions.py'))) throw new Error('pipeline scripts not installed: nothing to check');
             const py = process.platform === 'win32' ? 'python3' : 'python3';
             const live = execFileSync(py, ['-I', path.join(os.homedir(), '.wv-bin', 'wv-sessions.py'), 'live'], { encoding: 'utf8', windowsHide: true, timeout: 20000 }).trim();
             if (live) {

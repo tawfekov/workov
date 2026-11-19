@@ -23,17 +23,20 @@ If you cannot continue (a decision only the owner can make), set `waiting-user`,
 1. The ticket: `specs/tickets/<slug>/rd.md` (goal, acceptance criteria, the states table, the texts table, the API
    contract, the `## Mockup` section) and `eval.md`, plus the brief if one is given.
 2. The design system: `DESIGN.md` and `PRODUCT.md` at the repo root (brand, palette, type, themes, RTL, what the product
-   is for), then the theme tokens in `src/styles.css` (semantic names, light and dark). **The mockup must use these exact
+   is for), then the theme tokens (the project's global stylesheet or token file: find it, for example with Glob
+   `**/styles.*` or `**/tokens.*`; semantic names, light and dark). **The mockup must use these exact
    colours, fonts and semantic roles**, not generic grays or a default blue. If a token is missing for something you
    need, say so in the notes instead of inventing a colour.
-3. The real screens: the page this ticket changes (its `.html` and component under `src/app/`), and one or two sibling
-   screens that solve the same kind of problem (a table, a form, a dialog). Note the components and classes they use
-   (`src/app/components/`). The mockup must look like it belongs in this app and reuse its patterns.
+3. The real screens: the page this ticket changes (its template and component under the project's source folder),
+   and one or two sibling screens that solve the same kind of problem (a table, a form, a dialog). Note the components and
+   classes they use (the shared components folder). The mockup must look like it belongs in this app and reuse its patterns.
+   The source folder and the stack come from `node .claude/scripts/stack.cjs` (fields `srcDir` and `profile`); do not assume a framework.
 4. The UI/UX rules. **This step is mandatory: every design uses the `ui-ux-pro-max` skill, and you do not start section 2
    before you ran it.** Run 3 to 6 focused searches (one concern each) and note which rules you applied:
    `python ~/.claude/skills/ui-ux-pro-max/scripts/search.py "<2-5 words>" --domain ux`
    Typical concerns: form validation and errors, data table on mobile, empty and loading states, alert or toast,
-   touch targets, keyboard focus. For stack notes: `--stack angular` or `--stack html-tailwind`. If Python is missing,
+   touch targets, keyboard focus. For stack notes use `--stack <designerStack>` with the `designerStack` that `stack.cjs` reports (`angular` for an Angular
+   project, `html-tailwind` for everything else). If Python is missing,
    use the checklist in section 3 only.
 
 ## 2. Build `specs/tickets/<slug>/mockup.html`

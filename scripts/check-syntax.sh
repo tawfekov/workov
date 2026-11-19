@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Syntax check for every script this kit ships. Run it before a commit and in CI: bash scripts/check-syntax.sh
+# Syntax check for every script this kit ships. Run it before a commit and in CI: bash scripts/check-syntax.sh [dir]
+# (dir: check another checkout, for example one pull request exported to a temp folder; default: this repository)
 #   .cjs  -> node --check
 #   .js   -> node --check as an ES module (a plugin file is loaded as one, and `node --check` on the .js alone can pass wrongly)
 #   .sh   -> bash -n
@@ -7,7 +8,7 @@
 # Why: a script written through a shell heredoc or a JSON string can lose its backslashes ('\n' becomes a line break,
 # '\b' a backspace character). The file still looks fine and breaks only where it is loaded.
 set -u
-cd "$(dirname "$0")/.."
+cd "${1:-$(dirname "$0")/..}" || exit 2
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail=0; n=0
 files="$( (git ls-files; git ls-files --others --exclude-standard) 2>/dev/null | sort -u )"

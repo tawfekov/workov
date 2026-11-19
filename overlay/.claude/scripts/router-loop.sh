@@ -25,6 +25,14 @@ if [ -n "$HUB" ] && [ "$SAME" = "0" ] && [ -d "$HUB/job" ]; then
   echo "the one router runs from $HUB; nothing to do here"
   exit 0
 fi
+# The helpers below ship in the pipeline scripts (the repository's wv-bin/ folder, copied to ~/.wv-bin by install.sh --with-home).
+# Without them the loop cannot even pick a project (wv-turn.py) and would stop at once with no explanation: say what is missing instead.
+MISSING=""; for h in wv-turn.py wv-sessions.py wv-gate.py wv-plan.py wv-settle.py wv-dispatch.py wv-adopt.py wv-busy.py wv-stop.py wv-bashenv.sh; do [ -f "$HOME/.wv-bin/$h" ] || MISSING="$MISSING $h"; done
+if [ -n "$MISSING" ]; then
+  echo "router-loop: not started. These helper scripts are missing from ~/.wv-bin:$MISSING" >&2
+  echo "They come with the pipeline scripts (wv-bin/); install them with: bash install.sh <repository> --with-home" >&2
+  exit 3
+fi
 mkdir -p job
 PIDFILE=job/router-loop.pid
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then echo "router loop already running (pid $(cat "$PIDFILE"))"; exit 0; fi
@@ -35,6 +43,7 @@ echo $$ > "$PIDFILE"
 ( while sleep 20; do python3 -I "$HOME/.wv-bin/wv-sessions.py" reap >/dev/null 2>&1; python3 -I "$HOME/.wv-bin/wv-gate.py" >/dev/null 2>&1; python3 -I "$HOME/.wv-bin/wv-dispatch.py" >/dev/null 2>&1; python3 -I "$HOME/.wv-bin/wv-adopt.py" >/dev/null 2>&1; python3 -I "$HOME/.wv-bin/wv-plan.py" >/dev/null 2>&1; done ) &
 GUARD_PID=$!
 trap 'kill "$GUARD_PID" 2>/dev/null; rm -f "$PIDFILE" "$HOME_DIR/router-project.json"; python3 -I "$HOME/.wv-bin/wv-stop.py" >/dev/null 2>&1' EXIT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERVAL="${WV_ROUTER_INTERVAL:-90}"
 # Approvals: the plugin is switched on for every agent this loop starts (1 = on); WHAT it does is the approvals mode, read from
 # WV_APPROVALS (ask | auto-safe) if you set it, else ~/.workov/settings.json, else ask. The loop no longer forces auto.
@@ -187,14 +196,21 @@ while true; do
   NAME="$(printf '%s' "$PICK" | cut -f2)"
   ROOT="$(printf '%s' "$PICK" | cut -f3)"
   printf '{"name": "%s", "root": "%s", "at": "%s"}\n' "$NAME" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME_DIR/router-project.json"
-  CTX="PROJECT $NAME, HOME $ROOT. This cycle is only about this project. Every path in your instructions that starts with job/, specs/, .claude/ or .opencode/ means that path under HOME (use the absolute path), and every git or script command must name the project explicitly: git -C \"$ROOT\" ..., or a script by its absolute path with the project as an argument. Your shell is Windows PowerShell 5.1: NEVER chain commands with && or ||, never use bash-only syntax (export, heredocs, $(...), VAR=x cmd); run one simple command per call. For file work use your Read, Glob, Grep, Write and Edit tools instead of shell commands. Do not touch any other project."
+  # which shell the agents run in (from the platform, or WV_AGENT_SHELL) and how this project is built and tested (stack.cjs)
+  SHELL_NOTE="$(bash "$SCRIPT_DIR/shell-note.sh" 2>/dev/null || true)"
+  STACK_NOTE="$(node "$SCRIPT_DIR/stack.cjs" --root "$ROOT" --note 2>/dev/null || true)"
+  # the prompt is built from parts so the Claude runtime can drop the shell sentences and keep everything else
+  CTX_HEAD="PROJECT $NAME, HOME $ROOT. This cycle is only about this project. Every path in your instructions that starts with job/, specs/, .claude/ or .opencode/ means that path under HOME (use the absolute path), and every git or script command must name the project explicitly: git -C \"$ROOT\" ..., or a script by its absolute path with the project as an argument."
+  CTX_SHELL=" $SHELL_NOTE For file work use your Read, Glob, Grep, Write and Edit tools instead of shell commands."
+  CTX_TAIL=" $STACK_NOTE Do not touch any other project."
+  CTX="$CTX_HEAD$CTX_SHELL$CTX_TAIL"
   echo "[router-loop] cycle for $NAME"
   RT="$(router_runtime | tr -d '\r')"
   case "$RT" in
   claude\ *)
     CM="${RT#claude }"
     echo "[router-loop] router on Claude ($CM)"
-    CTXC="${CTX/ Your shell is Windows PowerShell*instead of shell commands./}"
+    CTXC="$CTX_HEAD$CTX_TAIL"
     sync_router_claude
     if [ -s "$CSID_FILE" ]; then CMSG="$CTXC $NEXT"; else CMSG="$CTXC $FIRST"; fi
     if claude_cycle "$CMSG$(busy_note "$ROOT")$(live_note "$ROOT")$(workers_note)" "$CM" "$ROOT"; then

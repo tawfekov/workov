@@ -1,0 +1,1 @@
+Your shell is a POSIX shell (bash or zsh): you may pipe and chain with && when every part is a simple command, but quote every path and keep each call to one small step.

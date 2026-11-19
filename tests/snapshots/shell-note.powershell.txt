@@ -1,0 +1,1 @@
+Your shell is Windows PowerShell 5.1: NEVER chain commands with && or ||, never use bash-only syntax (export, heredocs, $(...), VAR=x cmd); run one simple command per call.

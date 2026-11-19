@@ -504,11 +504,108 @@ it installs is committed to your repository: it is written to `.git/info/exclude
 
 ```
 bash install.sh <repository>          # clone mode: creates ~/Workov/fleets/<name>
-bash install.sh <repository> --in-place --no-command   # straight into the given repo (for tests)
+bash install.sh <repository> --in-place --no-command   # straight into the given repo, nothing in your home folder (for tests)
 bash install.sh --hub                 # the neutral hub only
+bash install.sh --help                # every option
 bash uninstall.sh <repository>        # remove an in-place install
 ```
 
-`install.sh` uses this repository as the base (`--base <path-or-git-url>` to use another checkout). It needs git, bash,
-Node.js and Python 3; the fleet itself needs OpenCode. Optional settings live in `~/.claude/workov-profile.json`
-(see `profile.example.json`).
+It needs git, bash, Node.js and Python 3; the fleet itself needs OpenCode. Optional settings live in
+`~/.claude/workov-profile.json` (see `profile.example.json`).
+
+### Install options
+
+| Option | What it does |
+| --- | --- |
+| `--base <path-or-git-url>` | The Workov base to install. Default: this repository. **A git URL is cloned and its `.claude/scripts/install.sh` is run on your machine**, so only point it at a repository you trust. |
+| `--in-place` | Install straight into the given repository instead of a fleet clone under `~/Workov/fleets/<name>`. |
+| `--no-setup` | Skip the models and landing setup. |
+| `--no-command` | Skip every file in your home folder (see below). |
+| `--with-home` | Write the home-folder files without asking. `WV_WITH_HOME=1` does the same, for an app or a script that already asked you. |
+| `--approvals ask\|auto-safe` | The approvals mode (see below). |
+| `--force` | Install into a target that has uncommitted changes. Without it the installer stops. Your changes are kept, and a copy is saved to `~/.workov/backups/<time>/pre-install.patch` first. |
+| `--hub [dir]` | Install the neutral hub (default `~/Workov/hub`): the dashboard and the router, no tickets. |
+
+### What the installer touches
+
+- **Your repository.** In clone mode it is never touched. With `--in-place`, files the base installer replaces are put back, except
+  files you had already changed. The fleet clone is fast-forwarded to its upstream branch; if it has diverged the installer stops
+  and changes nothing, so commits made in the clone are never reset.
+- **Your home folder.** The `/task` command (`~/.claude/commands/task.md`), the approvals plugin
+  (`~/.config/opencode/plugins/approvals.js`), `~/.claude/wv-fleet/land.cjs`, `~/.workov/policy/` and `~/.wv-bin/` live outside the
+  project, so the installer asks first (`--with-home` or a yes at the prompt). Without a terminal and without the flag they are
+  skipped and it says so. Any file it would replace with different content is first copied to `~/.workov/backups/<time>/`.
+- **`~/.workov/`.** Workov's own state: the project list (`fleets.json`), the hub (`hub.json`) and `settings.json`. Written without asking.
+
+### Approvals mode
+
+What an agent does when the command policy neither allows nor denies a request. It is a machine-wide setting in
+`~/.workov/settings.json` (`{"approvals": {"mode": "ask"}}`), read when an agent starts, so a change applies from the next agent start.
+
+| Mode | Behaviour |
+| --- | --- |
+| `ask` | What the policy allows runs, what it denies is refused, everything else waits for you in the dashboard (and on your phone). The fleet pauses until you answer. Default. |
+| `auto-safe` | What the policy denies is refused, everything else runs without asking. This is what an unattended fleet needs. |
+
+The mode comes from `WV_APPROVALS` (`ask` or `auto-safe`) if set, else the setting, else `ask`. `auto` is the old name of
+`auto-safe` and still works. Any other value of `WV_APPROVALS` (for example `1`) only switches the plugin on and leaves the mode to the
+setting; an unknown value never falls back to auto. `install.sh --approvals ask|auto-safe` writes the setting. A fresh machine gets `ask`
+(the installer asks once when it has a terminal); a machine that already ran the fleet and has no recorded choice stays on `auto-safe`,
+so a reinstall never stalls a running fleet.
+
+### Command policy
+
+Shell commands are checked by `.claude/scripts/wv-policy.cjs` against the rules in `.claude/scripts/policy.json`. A command is split
+into its parts (`;`, `&&`, `||`, `|`, `&`, line breaks) and each part is checked on its own, so `git status; git push` is not allowed
+because it starts with `git status`. Global flags are normalised (`git -C x push` is `push`), `bash -c "..."` and a denied command
+hidden behind another (`xargs git push`) are looked into, URL hosts are parsed (`curl http://localhost.evil.com` is outside
+localhost), and `$( )`, backticks, heredocs and writes to a file are never waved through silently. Rules: `deny` wins, then `allow`,
+anything else asks. Edit `policy.json` to change them.
+
+`WV_POLICY` selects how the engine is used: `off`; `warn` (the default), where the older prefix rules still decide and each command
+the engine would have decided differently is appended to `job/policy-warn.jsonl`; `enforce`, where the engine decides and nothing the
+older rules deny is let through. Read the warn log for a while before enforcing. To try the rules on real commands,
+`node tests/policy-replay.cjs <commands.jsonl>` replays them through both and lists what would change.
+
+### Shell and stack
+
+Nothing assumes Windows or one framework.
+
+- **The shell.** Each cycle the router is told which shell its commands run in (`.claude/scripts/shell-note.sh`): Windows PowerShell
+  on Windows (no `&&`, no bash-only syntax), a POSIX shell anywhere else. If your agents run in another shell than the platform
+  suggests (Git Bash or WSL on Windows, `pwsh` on Linux), set `WV_AGENT_SHELL=posix` or `WV_AGENT_SHELL=powershell`. The command policy
+  parses commands in the same dialect.
+- **The stack.** `node .claude/scripts/stack.cjs` reports how the project is built, linted and tested, detected from its files:
+  `package.json` and its lockfile (npm, pnpm, yarn, bun; Angular, Next, Nuxt, Vue, Svelte, React or plain Node), `pyproject.toml` or
+  `requirements.txt` (pip, uv, poetry), `go.mod`, `Cargo.toml`, `pom.xml`, gradle, dotnet, or a `Makefile`. The router gets the result
+  every cycle, and the designer agent reads the source folder and design stack from it, so agents run the project's own commands
+  instead of guessing. Angular is one profile among these. A command the project does not have is reported as `none` and recorded as SKIP.
+- **Overriding it.** Add a `stack` key to `specs/workov.config.json`; it only has to list what differs, and a command set to `null` means
+  the project has none:
+
+  ```json
+  "stack": { "profile": "angular", "srcDir": "src/app", "commands": { "test": "pnpm run test -- --watch=false", "lint": null } }
+  ```
+
+The command policy allows the test and build runners of these stacks (`pytest`, `go test`, `cargo test`, `make test`, `mvn test`, and so
+on) the way it allows `pnpm test`; anything that runs arbitrary code (`cargo run`, `go run`, `uv run <anything>`) still asks.
+
+### Landing order
+
+The patches in `patches/` are applied by `install.sh` in a fixed order, and some change text that an earlier pull request's patch added.
+Measured by applying each pull request's patches on top of an installed PR 1: the dashboard patches (1/2) need nothing, the dashboard
+patches (2/2) need (1/2), and the single router, the eight-stage pipeline and dispatch reliability need both. Land them in that order.
+A patch that does not apply is named and skipped (the install continues), and a summary lists it.
+
+### Checks
+
+`bash scripts/check-syntax.sh` checks every script (a plugin is checked as an ES module, and a lost backslash is reported), and the
+tests live in `tests/` (`test_policy.cjs`, `test_policy_plugin.cjs`, `test_approvals_plugin.cjs`, `test_stack.cjs`, `test_portability.sh`,
+`test_installer_safety.sh`, `test_home_consent.sh`, `test_approvals_mode.sh`, `test_docs.sh`). Installer tests run on throwaway repositories
+with a temporary home folder. `bash tests/run-all.sh` runs the syntax check and every test, on Linux, macOS and Windows (Git Bash).
+
+`bash scripts/check-standalone.sh <git-ref>` checks that one pull request stands on its own: every file its scripts call either ships in it or
+is guarded by an existence test, every script parses, and its installer (if it has one) runs in a throwaway repository with a throwaway
+home folder. With `--providers 'refs/remotes/<remote>/*'` it also names the other pull request that ships each missing file, which is the
+order the pull requests have to land in. The router loop is the one script that needs the pipeline scripts (`wv-bin/`, copied to
+`~/.wv-bin` by `install.sh --with-home`): without them it refuses to start and lists what is missing.

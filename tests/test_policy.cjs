@@ -25,6 +25,11 @@ const CASES = [
   ['command -v node', 'allow'], ['cd src && ls', 'allow'], ['bash -c "ls -la"', 'allow'], ['FOO=1 git status', 'allow'],
   ['Get-Content a.txt | Select-String foo', 'allow', 'powershell'], ['Get-ChildItem -Recurse | Select-Object -First 5', 'allow', 'powershell'],
   ['Select-String -Path x.ts -Pattern y; Test-Path z', 'allow', 'powershell'],
+  // ---- other stacks' checks are allowed like pnpm test is; anything that runs arbitrary code still asks ----
+  ['make test', 'allow'], ['make build && make lint', 'allow'], ['pytest -q tests/', 'allow'], ['python -m pytest', 'allow'], ['python3 -m ruff check .', 'allow'],
+  ['uv run pytest', 'allow'], ['poetry run mypy .', 'allow'], ['cargo test', 'allow'], ['cargo clippy -- -D warnings', 'allow'], ['go test ./...', 'allow'],
+  ['go vet ./...', 'allow'], ['dotnet test', 'allow'], ['mvn -q test', 'allow'], ['./gradlew test', 'allow'],
+  ['make install', 'ask'], ['cargo run', 'ask'], ['go run main.go', 'ask'], ['uv run rm -rf x', 'ask'], ['python -m http.server', 'ask'], ['python script.py', 'ask'],
   // ---- ask: not listed, or something the policy will not wave through silently ----
   ['git status; rm foo', 'ask'], ['echo hi > out.txt', 'ask'], ['echo hi >> out.txt', 'ask'], ['ls $(whoami)', 'ask'],
   ['ls ' + BQ + 'whoami' + BQ, 'ask', 'posix'], ['ls || true', 'ask'], ['sleep 1 &', 'ask'], ['cat <<EOF', 'ask'], ['ls "unterminated', 'ask'],

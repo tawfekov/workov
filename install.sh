@@ -3,15 +3,23 @@
 # landing, OpenCode Go models, permission approvals, mockup tab, one dashboard for every project, the stage pipeline,
 # Copilot/Kilo/Antigravity implementers) + the /task command.
 #
-#   bash install.sh <target-repo> [--base <path-or-git-url>] [--in-place] [--no-command] [--no-setup] [--force] [--with-home] [--approvals ask|auto-safe]
+#   bash install.sh <target-repo> [options]
 #   bash install.sh --hub [dir]      the neutral hub (default ~/Workov/hub): dashboard + router, no tickets, not a project
 #
-# The installer stops if the target has uncommitted changes to tracked files; commit or stash them, or pass --force
-# (your changes are kept, and a copy of them is saved under ~/.workov/backups/ first).
+# Options:
+#   --base <path-or-git-url>   the Workov base to install (default: this repository). A git URL is cloned and ITS
+#                              .claude/scripts/install.sh is RUN on this machine: only use a base you trust.
+#   --in-place                 install straight into <target-repo> (default: a fleet clone under ~/Workov/fleets/<name>)
+#   --no-setup                 skip the models and landing setup
+#   --no-command               skip every file in your home folder (the /task command, the plugin, ~/.wv-bin, the policy)
+#   --with-home                write those home-folder files without asking (or set WV_WITH_HOME=1). Without a terminal and
+#                              without this flag they are skipped. A file that would be replaced is saved to ~/.workov/backups/<time>/
+#   --approvals ask|auto-safe  what an agent does when the command policy neither allows nor denies something:
+#                              ask waits for you, auto-safe goes ahead (what is denied is refused in both). Kept in
+#                              ~/.workov/settings.json. Default: ask; a machine that already ran the fleet stays on auto-safe
+#   --force                    install into a target that has uncommitted changes (they are kept; a copy is saved first)
 #
-# --base defaults to this repository (the folder that holds install.sh and .claude/scripts/install.sh); pass a path or
-# a git URL to use another checkout of the base.
-#
+# Without --force the installer stops if the target has uncommitted changes to tracked files.
 # Everything installed into the target repo stays out of git (written to .git/info/exclude); tracked files the
 # base installer would replace are restored. Requires: git, bash, node, a real python 3; opencode for the fleet.
 set -euo pipefail
@@ -31,7 +39,7 @@ while [ $# -gt 0 ]; do
     --no-setup) DO_SETUP=0; shift ;;
     --in-place) IN_PLACE=1; shift ;;
     --hub) HUB_MODE=1; IN_PLACE=1; shift ;;
-    -h|--help) sed -n 2,13p "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
     *) TARGET="$1"; shift ;;
   esac
 done
@@ -206,11 +214,18 @@ fi
 
 # 4. the Workov layer: overlay files, then patches (after setup, which regenerates agent files)
 cp -R "$HERE/overlay/." "$TARGET/"
+FAILED_PATCHES=""
 for p in agents worker dashboard agent-logs agent-roster decision-help dashboard-run dashboard-review dashboard-pause dashboard-overlay dashboard-fixes dashboard-insight dashboard-providers2 dashboard-connect dashboard-providers-page dashboard-providers-tab dashboard-providers-v2 dashboard-keystore dashboard-issue dashboard-answered dashboard-roster dashboard-readonly dashboard-router dashboard-mobile dashboard-theme dashboard-themes2 dashboard-polish named-tunnel tunnel-windows resource-rules ask-before-skip never-discard router-no-heavy delegate windows designer dashboard-claude dashboard-claude-account dashboard-cardfix telemetry-v2 dashboard-agentmodels dispatch-reliable failover dashboard-workers dashboard-workers2 worker-worktree land-branch dashboard-nav-chat dashboard-chat-theme chat-bridge dashboard-chat-web agent-steps dashboard-steps dashboard-processes retry-ticket projects-board project-context board-projects router-drafts-wait one-dashboard router-projects router-gate-skips fleet-stop-clean unique-prefix hub-guard neutral-sessions all-fleet-agents theme-andon-fix mockup-open-fix chat-no-snapshot chat-webview chat-noscroll chat-fixed writer-state autostart-writers timeline-all agents-live stages-v2 steps-other-project one-limit workers-count neutral-hub diff-lines models-list claude-runtime project-stage-actions stage-ui claude-steps telemetry-all-projects all-projects-views question-visible answer-visible plan-queue-label pre-plan-label board-loading timeline-loading writer-question stage-queue design-approval; do
   # a patch that is not shipped (yet) is skipped silently: later changes only ADD patch files
   [ -f "$HERE/patches/$p.cjs" ] || continue
-  ( cd "$TARGET" && node "$HERE/patches/$p.cjs" )
+  # one patch that does not apply (its anchor text is missing, usually because a patch of another PR has to land first) is named and
+  # skipped; the install goes on and the summary below lists them
+  if ! pout="$( cd "$TARGET" && node "$HERE/patches/$p.cjs" 2>&1 )"; then
+    FAILED_PATCHES="$FAILED_PATCHES $p"; echo "patch $p did not apply: $(printf %s "$pout" | grep -m1 -E "Error|anchor|not found" | cut -c1-160)" >&2
+  else [ -z "$pout" ] || printf "%s
+" "$pout"; fi
 done
+[ -z "$FAILED_PATCHES" ] || echo "note: these patches did not apply:$FAILED_PATCHES (they depend on patches from another pull request; see the README, Landing order)" >&2
 
 # Register this project in the machine-wide fleet list: the one dashboard shows every project's tickets, and only one
 # worker runs at a time across them. WV_PROJECT_NAME overrides the display name (default: the folder name).
@@ -327,5 +342,6 @@ echo
 echo "Workov kit installed into $TARGET"
 echo "  -> landing opens a PR (gh) or an MR (glab) for the origin host: log in with gh or glab once"
 echo "  -> optional: ~/.claude/workov-profile.json (reviewers, a tracker hook); see profile.example.json"
+[ -d "$HERE/wv-bin" ] || [ -f "$HOME/.wv-bin/wv-turn.py" ] || echo "  -> note: this checkout has no wv-bin/ (the pipeline scripts) and ~/.wv-bin has none, so the router loop will refuse to start until they are installed"
 echo "  -> run: $PY3 .claude/scripts/selftest.py   (inside the target repo)"
 echo "  -> read README.md for the daily workflow"

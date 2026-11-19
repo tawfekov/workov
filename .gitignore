@@ -7,7 +7,6 @@ __pycache__/
 .continue
 # Regression sweep evidence (checker full mode): runtime output, never committed
 specs/regression-evidence/
-# the Workov kit (Electron app, dev installs)
+# dev installs
 node_modules/
 *.log
-app/dist-installer/
