@@ -67,6 +67,10 @@ def main():
                 time.sleep(60)
                 continue
             beat = Path(q["root"]) / "job" / ("status-writer-" + q["ticket"][:3] + ".json")
+            if not (Path(q["root"]) / ".claude" / "scripts" / "plan.cjs").is_file():
+                print("skipped", q["ticket"], ": .claude/scripts/plan.cjs is not installed in", q["root"], flush=True)
+                time.sleep(60)
+                continue
             print("planning", q["ticket"], flush=True)
             r = subprocess.run(["node", ".claude/scripts/plan.cjs", q["ticket"], q["brief"]], cwd=q["root"],
                                capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
