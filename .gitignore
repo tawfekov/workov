@@ -1,9 +1,6 @@
-# workov runtime directories & logs
-job/
-.claude/worktrees/
-__pycache__/
-*.py[cod]
+node_modules/
+*.log
 .DS_Store
-.continue
-# Regression sweep evidence (checker full mode): runtime output, never committed
-specs/regression-evidence/
+vendor/**/job/
+vendor/**/node_modules/
+app/dist-installer/

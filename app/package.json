@@ -1,0 +1,98 @@
+{
+  "name": "workeve",
+  "productName": "Workerov",
+  "version": "0.6.0",
+  "description": "Windows launcher for the Workerov worker fleet: starts with Windows, keeps the dashboard, router and tunnel running, shows the dashboard in its own window.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "icon": "node make-icon.js",
+    "start": "electron .",
+    "selftest": "electron . --selftest",
+    "pack": "node make-icon.js && node build.js",
+    "dist": "node make-icon.js && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^26.18.0",
+    "rcedit": "^5.0.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.325"
+  },
+  "build": {
+    "appId": "app.workeve",
+    "productName": "Workerov",
+    "directories": {
+      "output": "dist-installer"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "33.4.11",
+    "files": [
+      "main.js",
+      "chat-engine.js",
+      "preload.js",
+      "shell-preload.js",
+      "processes.js",
+      "processes.html",
+      "processes-page.js",
+      "processes-preload.js",
+      "setup.js",
+      "chat.js",
+      "chat-md.js",
+      "chat-boot.js",
+      "chat.html",
+      "chat.css",
+      "icon.png",
+      "package.json",
+      "start.html",
+      "start-page.js",
+      "chat-bridge.js",
+      "chat-web.js",
+      "about.html",
+      "about-page.js",
+      "about-preload.js",
+      "add-project.js"
+    ],
+    "asarUnpack": [
+      "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Workerov",
+      "uninstallDisplayName": "Workerov",
+      "runAfterFinish": true
+    },
+    "afterPack": "after-pack.js",
+    "extraResources": [
+      {
+        "from": "..",
+        "to": "kit",
+        "filter": [
+          "install.sh",
+          "uninstall.sh",
+          "exclude.txt",
+          "profile.example.json",
+          "LICENSE",
+          "patches/**/*",
+          "overlay/**/*",
+          "wv-bin/**/*",
+          "commands/**/*",
+          "vendor/**/*",
+          "!**/node_modules/**",
+          "!**/job/**",
+          "!**/__pycache__/**"
+        ]
+      }
+    ]
+  }
+}
